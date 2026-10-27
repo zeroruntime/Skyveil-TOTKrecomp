@@ -182,32 +182,47 @@ def seed_beside(ipa, app):
     seed = ipa.with_name(ipa.stem + '-shader-seed')
     return seed if not (app/'GameData/shader-seed').is_dir() and (seed/'fingerprint.txt').is_file() else None
 
+def seed_on_device(dev, bundle_id, folder, game_data, documents):
+    """Whether the named seed is complete or staged on the device. Packs from older installers live in GameData; new
+    packs live directly in Documents so the app can remove them after unpacking. Completed seeds live under
+    Documents/shader-seeds (or, for compatibility, Documents/<folder>)."""
+    if not folder.startswith('shader-seed-') or '/' in folder or '\\' in folder:
+        return False
+    if folder in game_data or f'{folder}.pack.000' in game_data or f'{folder}.pack.000' in documents:
+        return True
+    for sub in (f'Documents/shader-seeds/{folder}', f'Documents/{folder}'):
+        if 'seed-manifest.json' in device_files(dev, bundle_id, sub):
+            return True
+    return False
+
 def push_seed(dev, bundle_id, seed):
     """The startup shaders of an app built with --ios-game-data documents (<app>-shader-seed beside it) into Documents/
-    GameData as one stream in 1 GiB parts (<folder>.pack.000, ...), then shader-seed.txt naming the folder; the app unpacks
-    them on its next start (ios/Sources/main.m seed_unpack). devicectl copying the folder itself stopped after ~25,000 of
-    its 128,000 files over the cable (2026-10-23). Skipped while the device has this content (fingerprint.txt)."""
+    as one stream in 1 GiB parts (<folder>.pack.000, ...), then Documents/GameData/shader-seed.txt naming the folder; the
+    app unpacks them into its writable Documents/shader-seeds directory on its next start (ios/Sources/main.m seed_unpack).
+    devicectl copying the folder itself stopped after ~25,000 of its 128,000 files over the cable (2026-10-23). Skipped
+    while the device has this content (fingerprint.txt)."""
     fp = (seed/'fingerprint.txt').read_text().strip()
     with tempfile.TemporaryDirectory(dir=seed.parent) as d:   # beside the seed: 1 GiB parts, not on the system disk
         got = Path(d)/'shader-seed.txt'
         r = subprocess.run(['xcrun','devicectl','device','copy','from','--device',dev,'--domain-type','appDataContainer',
                             '--domain-identifier',bundle_id,'--source','Documents/GameData/shader-seed.txt','--destination',got], capture_output=True)
         lines = got.read_text().split('\n') if r.returncode == 0 and got.is_file() else []
-        have = device_files(dev, bundle_id, 'Documents/GameData')
-        if len(lines) >= 2 and lines[1].strip() == fp and (lines[0] in have or f'{lines[0]}.pack.000' in have):
+        game_data = device_files(dev, bundle_id, 'Documents/GameData')
+        documents = device_files(dev, bundle_id, 'Documents')
+        if len(lines) >= 2 and lines[1].strip() == fp and seed_on_device(dev, bundle_id, lines[0], game_data, documents):
             print('shaders: the device already has these'); return
         folder = f'shader-seed-{fp[:12]}-{int(time.time())}'
         names = sorted(p.name for p in seed.iterdir() if p.is_file())
         total = sum((seed/n).stat().st_size for n in names)
         print(f'shaders: copying {len(names)} files, {total / 2**30:.1f} GiB, as one pack (once per shader list; later installs keep them)')
-        def copy(local, name):
+        def copy(local, name, subdirectory='Documents'):
             run(['xcrun','devicectl','device','copy','to','--device',dev,'--domain-type','appDataContainer','--domain-identifier',
-                 bundle_id,'--source',local,'--destination',f'Documents/GameData/{name}'], capture_output=True)
-        got.write_text('stale\n'); copy(got, 'shader-seed.txt')   # until every part is there
+                 bundle_id,'--source',local,'--destination',f'{subdirectory}/{name}'], capture_output=True)
+        got.write_text('stale\n'); copy(got, 'shader-seed.txt', 'Documents/GameData')   # until every part is there
         def push(local):
             copy(local, local.name); local.unlink(); print(f'  {local.name}', flush=True)
         write_pack(seed, names, Path(d), folder, PART, push)
-        got.write_text(f'{folder}\n{fp}\n'); copy(got, 'shader-seed.txt')
+        got.write_text(f'{folder}\n{fp}\n'); copy(got, 'shader-seed.txt', 'Documents/GameData')
 
 def built_bundle_id(ipa, team):
     """The identifier build_app.py gave the app (org.macnativegames.totk, or .botw for Breath of the Wild); a .app folder

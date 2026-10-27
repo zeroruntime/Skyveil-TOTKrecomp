@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TOOLS = Path(__file__).resolve().parents[1]/'games/totk/ios/tools'
 sys.path.insert(0, str(TOOLS))
@@ -80,6 +81,70 @@ class ShaderPack(unittest.TestCase):
             got, exact = read_pack(parts)
             self.assertEqual(got, files)
             self.assertTrue(exact)   # nothing after the end mark
+
+class DeviceSeedPush(unittest.TestCase):
+    def test_seed_presence_covers_app_owned_and_legacy_layouts(self):
+        folder = 'shader-seed-fingerprint-123'
+        with mock.patch.object(install_device, 'device_files', return_value={'seed-manifest.json': 1}) as listing:
+            self.assertTrue(install_device.seed_on_device('device', 'bundle', folder, {}, {}))
+            listing.assert_called_once_with('device', 'bundle', f'Documents/shader-seeds/{folder}')
+        self.assertTrue(install_device.seed_on_device('device', 'bundle', folder, {}, {f'{folder}.pack.000': 1}))
+        self.assertTrue(install_device.seed_on_device('device', 'bundle', folder, {folder: 1}, {}))
+        self.assertTrue(install_device.seed_on_device('device', 'bundle', folder, {f'{folder}.pack.000': 1}, {}))
+        self.assertFalse(install_device.seed_on_device('device', 'bundle', '../seed', {}, {f'../seed.pack.000': 1}))
+
+    def test_push_skips_matching_completed_and_staged_seeds(self):
+        folder, fingerprint = 'shader-seed-fingerprint-123', 'f' * 64
+        layouts = (
+            ({}, {f'{folder}.pack.000': 1}, {}),                       # new Documents pack
+            ({f'{folder}.pack.000': 1}, {}, {}),                       # legacy GameData pack
+            ({}, {}, {'seed-manifest.json': 1}),                       # app-owned completed seed
+        )
+        with tempfile.TemporaryDirectory() as d:
+            seed = Path(d)/'seed'; seed.mkdir()
+            (seed/'fingerprint.txt').write_text(fingerprint)
+            for game_data, documents, relocated in layouts:
+                with self.subTest(game_data=game_data, documents=documents, relocated=relocated):
+                    def read_marker(cmd, **kwargs):
+                        Path(cmd[cmd.index('--destination') + 1]).write_text(f'{folder}\n{fingerprint}\n')
+                        return mock.Mock(returncode=0)
+
+                    def listing(_dev, _bundle, subdirectory):
+                        return {'Documents/GameData': game_data, 'Documents': documents,
+                                f'Documents/shader-seeds/{folder}': relocated,
+                                f'Documents/{folder}': {}}.get(subdirectory, {})
+
+                    with mock.patch.object(install_device.subprocess, 'run', side_effect=read_marker), \
+                         mock.patch.object(install_device, 'device_files', side_effect=listing), \
+                         mock.patch.object(install_device, 'write_pack') as pack:
+                        install_device.push_seed('device', 'bundle', seed)
+                    pack.assert_not_called()
+
+    def test_push_stages_parts_in_documents_and_keeps_the_marker_in_gamedata(self):
+        with tempfile.TemporaryDirectory() as d:
+            seed = Path(d)/'seed'; seed.mkdir()
+            (seed/'fingerprint.txt').write_text('f' * 64)
+            (seed/'a.metal').write_bytes(b'abc')
+            copies = []
+
+            def fake_pack(source, names, folder, stem, size, done):
+                part = Path(folder)/f'{stem}.pack.000'
+                part.write_bytes(b'pack')
+                done(part)
+
+            def fake_run(cmd, **kwargs):
+                copies.append(cmd)
+
+            with mock.patch.object(install_device, 'device_files', return_value={}), \
+                 mock.patch.object(install_device.subprocess, 'run', return_value=mock.Mock(returncode=1)), \
+                 mock.patch.object(install_device, 'run', side_effect=fake_run), \
+                 mock.patch.object(install_device, 'write_pack', side_effect=fake_pack):
+                install_device.push_seed('device', 'bundle', seed)
+
+            destinations = [cmd[cmd.index('--destination') + 1] for cmd in copies]
+            self.assertEqual(destinations[0], 'Documents/GameData/shader-seed.txt')
+            self.assertRegex(destinations[1], r'^Documents/shader-seed-f{12}-\d+\.pack\.000$')
+            self.assertEqual(destinations[2], 'Documents/GameData/shader-seed.txt')
 
 
 

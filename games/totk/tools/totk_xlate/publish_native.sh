@@ -1,18 +1,24 @@
 #!/bin/zsh
 # Build the shader translation service the packaged app runs (totk_xlate --service): the Ryujinx shader translator
 # (vendor/ryujinx) with this project's patches (patches/*.patch) and the service (Service.cs), compiled ahead of time
-# with NativeAOT into one arm64 program that needs no .NET runtime.
-# build_app.py uses the copy in games/totk/prebuilt/macos-arm64 (made with this script), so building the app needs no
+# with NativeAOT into one program for this Mac's architecture that needs no .NET runtime.
+# build_app.py uses the copy in games/totk/prebuilt/macos-<architecture> (made with this script), so building the app needs no
 # .NET at all; run this only after changing the translator, its patches or Service.cs. Needs the .NET 10 SDK and network
 # access the first time (NuGet packages, the NativeAOT compiler).
 # SPIRV-Cross (build_app.py SPIRV_CROSS: the pinned commit, its sources and flags) is compiled in as well
 # (spirv_cross_inproc.cpp: its own main.cpp's compile_iteration), so the service needs no process per shader. The
 # sources are fetched at that commit; SPIRV_CROSS_SRC=<checkout at that commit> uses a local one instead.
-# usage: games/totk/tools/totk_xlate/publish_native.sh [dotnet]   -> games/totk/prebuilt/macos-arm64/totk_xlate (+ .sha256)
+# usage: games/totk/tools/totk_xlate/publish_native.sh [dotnet]   -> games/totk/prebuilt/macos-<architecture>/totk_xlate (+ .sha256)
 set -e
 HERE=${0:A:h}
 REPO=${HERE:h:h:h:h}
 DOTNET=${1:-dotnet}
+HOST_ARCH=$(uname -m)
+case $HOST_ARCH in
+  arm64) DOTNET_RID=osx-arm64 ;;
+  x86_64) DOTNET_RID=osx-x64 ;;
+  *) echo "unsupported Mac host architecture: $HOST_ARCH (needs arm64 or x86_64)"; exit 1 ;;
+esac
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM HUP
 mkdir -p "$WORK/ryujinx-src" "$WORK/xlate"
@@ -31,15 +37,15 @@ fi
 [[ $(git -C "$SRC" rev-parse HEAD) == $COMMIT ]] || { echo "$SRC is not SPIRV-Cross $COMMIT"; exit 1; }
 SOURCES=(${(f)"$(python3 -c "import ast,re,sys; t=open(sys.argv[1]).read(); print(chr(10).join(s for s in ast.literal_eval(re.search(r'^SPIRV_CROSS_SOURCES = (\(.*?\))$', t, re.M|re.S).group(1)) if s != 'main.cpp'))" "$REPO/build_app.py")"})
 FLAGS=(${(f)"$(python3 -c "import ast,re,sys; t=open(sys.argv[1]).read(); print(chr(10).join(ast.literal_eval(re.search(r'^SPIRV_CROSS_FLAGS = (\(.*?\))$', t, re.M).group(1))))" "$REPO/build_app.py")"})
-FLAGS+=(-mmacosx-version-min=12.0)   # as the NativeAOT link of the service (otherwise every object warns and may need a newer macOS)
+FLAGS+=(-arch "$HOST_ARCH" -mmacosx-version-min=12.0)   # match this host and the NativeAOT link's deployment target
 mkdir -p "$WORK/spvc"
 for f in "${SOURCES[@]}"; do xcrun clang++ "${FLAGS[@]}" -c "$SRC/$f" -o "$WORK/spvc/${f%.cpp}.o" & done
 xcrun clang++ "${FLAGS[@]}" -I"$SRC" -c "$HERE/spirv_cross_inproc.cpp" -o "$WORK/spvc/spirv_cross_inproc.o" &   # includes main.cpp
 wait
 xcrun ar rcs "$WORK/libtotk_spirv_cross.a" "$WORK"/spvc/*.o
-"$DOTNET" publish "$WORK/xlate/totk_xlate.csproj" -c Release -r osx-arm64 -p:PublishAot=true -p:InvariantGlobalization=true \
+"$DOTNET" publish "$WORK/xlate/totk_xlate.csproj" -c Release -r "$DOTNET_RID" -p:PublishAot=true -p:InvariantGlobalization=true \
   -p:RyuSrc="$WORK/ryujinx-src" -p:TotkSpirvCrossLib="$WORK/libtotk_spirv_cross.a" -o "$WORK/out"
-OUT=$REPO/games/totk/prebuilt/macos-arm64
+OUT=$REPO/games/totk/prebuilt/macos-$HOST_ARCH
 mkdir -p "$OUT"
 cp "$WORK/out/totk_xlate" "$OUT/totk_xlate"
 shasum -a 256 "$OUT/totk_xlate" | awk '{print $1}' > "$OUT/totk_xlate.sha256"

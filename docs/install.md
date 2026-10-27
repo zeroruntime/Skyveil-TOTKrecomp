@@ -10,8 +10,9 @@ Ground rules: use only files from your own Switch and your own game. Nothing is 
 
 ## What you need
 
-**A Mac** with Apple silicon and **macOS 26** or later (the graphics use Metal 4). 16 GB of memory or more is recommended.
-On macOS 15, use the community fork by [1918662410-ship-it](https://github.com/1918662410-ship-it/MacNativeGames), which adds a Metal 3 backend (not tested here).
+**For a macOS desktop app:** a Mac with Apple silicon and **macOS 26** or later (the graphics use Metal 4). 16 GB of memory or more is recommended.
+**For an iPhone or iPad build:** either an Intel or Apple silicon Mac with **macOS 15.6** or later and full Xcode 26 or later (with the iOS device SDK and Metal tools). The build still prepares the game data and shaders on the Mac.
+On macOS 15, use the community fork by [1918662410-ship-it](https://github.com/1918662410-ship-it/MacNativeGames) for a macOS desktop app; it adds a Metal 3 backend (not tested here).
 
 **Your game files**, dumped from your own Switch. The title ID is usually in the file name in brackets; the build reads the file itself, never its name.
 
@@ -50,8 +51,11 @@ The work folder is created next to the game file (`TOTK_build`, or `BotW_build` 
 
 ```sh
 xcode-select --install
-# Homebrew, if missing: see https://brew.sh (it must live in /opt/homebrew)
+# Homebrew, if missing: see https://brew.sh
+# For a macOS desktop app:
 brew install opus libvpx python@3.14
+# For an iPhone / iPad build:
+brew install xcodegen cmake ninja python@3.14
 ```
 
 Instead of Homebrew's Python you can use [uv](https://docs.astral.sh/uv/): `uv run --python 3.14 build_app.py …` in place of `python3.14 build_app.py …`.
@@ -112,7 +116,7 @@ With a separate update the app holds only the DLC packs you give with `--dlc`. A
 
 **Needed:**
 - iOS / iPadOS 26 and an iPhone 14 or newer.
-- On the Mac: the full **Xcode 26** or later with the iOS platform, plus `brew install xcodegen cmake ninja`.
+- On the Mac: Intel or Apple silicon, **macOS 15.6** or later, and full **Xcode 26** or later with the iOS device SDK and Metal tools, plus `brew install xcodegen cmake ninja`.
 - Your Apple ID in Xcode › Settings › Accounts. A free one works.
 - Developer Mode on the device.
 
@@ -122,7 +126,7 @@ With a separate update the app holds only the DLC packs you give with `--dlc`. A
 python3.14 build_app.py "<base 1.0.0.xci>" -k "<prod.keys>" --update "<1.4.3 update.nsp>" --platform ios --ios-game-data documents -o "<folder>/Tears of the Kingdom.ipa"
 ```
 
-The first iOS build also downloads and compiles device libraries. `--ios-game-data documents` leaves the 17 GB game image out of the IPA, so later installs take minutes.
+The first iOS build also downloads and compiles device libraries. If the repository does not include the shader translator for your Mac's architecture, build it with `games/totk/tools/totk_xlate/publish_native.sh`; this needs the .NET 10 SDK and network access on first use. `--ios-game-data documents` leaves the 17 GB game image out of the IPA, so later installs take minutes.
 
 **2. Install it** with the device connected by cable:
 

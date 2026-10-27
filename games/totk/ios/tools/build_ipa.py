@@ -86,11 +86,12 @@ def main():
     # The runtime's tables and hashes from the player's files (runtime/game_data.h) go into the app as files, not into its code.
     game_data=tree/f'build/game-data/{a.version}'
     if not (game_data/'runtime-tables.bin').is_file(): raise RuntimeError(f'missing game data: {game_data} (make game-data-{a.version})')
-    # Export the final code after all verified runtime patches have been applied, then embed it in executable segments.
-    host=tree/('build/totk-native' if a.version=='v0' else f'build/totk-native-{a.version}')
+    # Export with a host-native, export-only helper that links the same guarded C patcher as the device runtime. It treats
+    # guest ARM64 instructions as data and never boots the ARM loader.
     rewritten=tree/f'rewritten/{a.version}'; modules=gen/'modules';modules.mkdir(exist_ok=True)
     e=dict(env,TOTK_EXPORT_IOS=str(modules))
-    run([host,rewritten,'export-ios'],tree,logs/'export-ios.log',e)
+    run([sys.executable,ios/'tools/export_ios.py','--version',a.version,'--rewritten',rewritten,
+         '--game-data',game_data,'--out',modules],tree,logs/'export-ios.log',e)
     flags=subprocess.check_output([sys.executable,ios/'tools/gen_embed.py',rewritten,gen/'embed.S','--text-dir',modules,'main','subsdk0','sdk'],text=True,env=env).strip()
     # The app's sources use version-specific patch and generated runtime tables.
     project=project_for_platform((ios/'project.yml').read_text(),a.platform)

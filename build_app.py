@@ -12,7 +12,7 @@ or --shared-fonts as for a Tears of the Kingdom NSP. With a separate update (1.9
 (DLC) comes from --dlc <pack.nsp>, repeated for the two packs (01007EF00011F001, 01007EF00011F002), each one optional and
 checked against its pin. Its startup shaders come from its game data and its own shared shader list
 (games/botw/assets/shader_list.tsv). The game is recognised by the title IDs in the file, never by the file name.
-NSPs need common tickets (unless rights-free) and a separate shared-font source. iOS builds are unsigned IPAs for sideloading and require Xcode 26+, xcodegen, CMake, and network access to build device libraries.
+NSPs need common tickets (unless rights-free) and a separate shared-font source. iOS builds are unsigned IPAs for sideloading; their Mac host may be Apple silicon or Intel on macOS 15.6+, with full Xcode 26+, the iOS device SDK, Metal tools, xcodegen, CMake, and network access to build device libraries. macOS desktop builds remain Apple silicon / macOS 26+ only.
 Nothing from the game is in this repository; everything is made from your files on your Mac. Key values are never printed.
 
 Steps (each one checked against games/totk/assets/expected-v<version>.json, so a damaged dump or another version stops the
@@ -20,7 +20,7 @@ build at the first wrong file; a different dump of the same version is accepted 
 signature, or signed again by a dump tool once all four code modules match, shared fonts by valid BFTTF structure):
   1. code: ExeFS out of the XCI or NSP, a mod's main-module code patches merged when --mod is given
      (games/totk/scripts/mod_exefs.py, after checking them against the sites the app patches itself,
-     games/totk/scripts/patch_sites.py), the three code modules rewritten for Apple silicon
+     games/totk/scripts/patch_sites.py), the three code modules rewritten for ARM64
      (games/totk/third_party/d2r)
   2. data: RomFS (17 GB), the system shared fonts (from XCI firmware or an explicit font source), the RomFS overlays
   3. shaders: SPIRV-Cross (fetched at a pinned commit, compiled with clang) and the shader translator, which ships
@@ -40,13 +40,13 @@ what is already done and correct. A newer runtime from this repository goes into
 update_runtime.py "<the app>". Mac saves, shader cache and logs go to the user's Library folders; iOS keeps saves
 and the writable shader cache in the app's Documents container.
 
-Needs for Mac: macOS 26 or later on Apple silicon, the Xcode command line tools, Homebrew with
+Needs for a macOS desktop build: macOS 26 or later on Apple silicon, the Xcode command line tools, Homebrew with
     brew install opus libvpx python@3.14
-For iPhone/iPad: Xcode 26+ with iOS/Metal toolchains, plus xcodegen, CMake and Ninja.
+For iPhone/iPad: macOS 15.6+ on Apple silicon or Intel, full Xcode 26+ with the iOS device SDK and Metal tools, plus xcodegen, CMake and Ninja.
 Optional: Xcode's Metal toolchain (xcodebuild -downloadComponent MetalToolchain) compiles the startup shaders into the
 app, so moving or rebuilding it does not repeat that work at launch.
 """
-import argparse, concurrent.futures, glob, hashlib, json, os, platform, shutil, struct, subprocess, sys, threading, time
+import argparse, concurrent.futures, glob, hashlib, json, os, platform, re, shutil, struct, subprocess, sys, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -87,10 +87,12 @@ SPIRV_CROSS = ('https://github.com/KhronosGroup/SPIRV-Cross.git', 'aa217aeb6c9f0
 SPIRV_CROSS_SOURCES = ('main.cpp', 'spirv_cfg.cpp', 'spirv_cpp.cpp', 'spirv_cross.cpp', 'spirv_cross_parsed_ir.cpp',
                        'spirv_cross_util.cpp', 'spirv_glsl.cpp', 'spirv_hlsl.cpp', 'spirv_msl.cpp', 'spirv_parser.cpp',
                        'spirv_reflect.cpp')
-SPIRV_CROSS_FLAGS = ('-O3', '-DNDEBUG', '-std=c++11', '-arch', 'arm64', '-Wno-deprecated-declarations')
+SPIRV_CROSS_FLAGS = ('-O3', '-DNDEBUG', '-std=c++11', '-Wno-deprecated-declarations')
 # Homebrew first; then the folder of the running interpreter (the Python uv selected, or an activated virtual environment),
 # last so that a system Python's /usr/bin never shadows the Homebrew tools for the build's subprocesses.
-TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', str(Path(sys.executable).parent)]
+HOST_BREW_BIN = '/opt/homebrew/bin' if platform.machine() == 'arm64' else '/usr/local/bin'
+TOOL_PATHS = [HOST_BREW_BIN, '/usr/local/bin' if HOST_BREW_BIN == '/opt/homebrew/bin' else '/opt/homebrew/bin',
+              str(Path(sys.executable).parent)]
 
 
 def contrib_folder():
@@ -276,12 +278,72 @@ def _bfttf_valid(path):
 
 
 # ---- prerequisites ----
+def host_architecture(machine=None):
+    """The native architecture used for host tools built during this run."""
+    machine = machine or platform.machine()
+    if machine not in ('arm64', 'x86_64'):
+        raise BuildError(f'unsupported Mac host architecture: {machine} (needs Apple silicon or Intel x86_64)')
+    return machine
+
+
+def translator_path(tree, arch=None):
+    """The repository translator built for this Mac, not for the iOS device target."""
+    arch = host_architecture(arch)
+    return tree / f'prebuilt/macos-{arch}/totk_xlate'
+
+
+def dotnet_runtime_for_host(arch=None):
+    """NativeAOT runtime identifier for the Mac host architecture."""
+    arch = host_architecture(arch)
+    return {'arm64': 'osx-arm64', 'x86_64': 'osx-x64'}[arch]
+
+
+def _check_host_platform(target, system, machine, mac_version):
+    """Keep desktop builds on Apple silicon / macOS 26 while allowing iOS tooling on Intel / macOS 15.6."""
+    if system != 'Darwin':
+        raise BuildError('needs a Mac running macOS')
+    arch = host_architecture(machine)
+    version = tuple(int(part) for part in mac_version.split('.')[:2] if part.isdigit())
+    version = (version + (0, 0))[:2]
+    if target == 'ios':
+        if arch not in ('arm64', 'x86_64'):
+            raise BuildError('iOS builds need an Apple silicon or Intel Mac')
+        if version < (15, 6):
+            raise BuildError(f'iOS builds need macOS 15.6 or later; this is macOS {mac_version}')
+    else:
+        if arch != 'arm64':
+            raise BuildError('macOS desktop and Vision Pro builds need a Mac with Apple silicon')
+        if version < (26, 0):
+            raise BuildError(f'needs macOS 26 or later (Metal 4); this is macOS {mac_version}')
+
+
+def check_ios_xcode_toolchain():
+    """Require full Xcode 26+, its iOS device SDK, and the Metal compiler used for device shader libraries."""
+    try:
+        xcode = subprocess.run(['xcodebuild', '-version'], capture_output=True, text=True)
+    except OSError:
+        xcode = None
+    version = re.search(r'^Xcode\s+(\d+)(?:\.(\d+))?', xcode.stdout, re.M) if xcode else None
+    if not xcode or xcode.returncode or not version or int(version.group(1)) < 26:
+        detail = (xcode.stderr or xcode.stdout).strip() if xcode else 'xcodebuild was not found'
+        raise BuildError('iOS builds need the full Xcode 26 or later with the iOS platform installed; ' + detail[:300])
+    sdk = subprocess.run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], capture_output=True, text=True)
+    if sdk.returncode or not sdk.stdout.strip() or not Path(sdk.stdout.strip()).is_dir():
+        raise BuildError('iOS builds need the iPhoneOS device SDK from full Xcode 26 or later; install the iOS platform in Xcode')
+    missing = []
+    for tool in ('metal', 'metallib'):
+        found = subprocess.run(['xcrun', '--find', tool], capture_output=True, text=True)
+        if found.returncode or not found.stdout.strip() or not Path(found.stdout.strip()).is_file():
+            missing.append(tool)
+    if missing:
+        raise BuildError('iOS builds need Xcode Metal tools (' + ', '.join(missing) + '); install the Metal toolchain in Xcode')
+
+
 def prerequisites(args):
-    if platform.system() != 'Darwin' or platform.machine() != 'arm64':
-        raise BuildError('needs a Mac with Apple silicon')
-    major = int(platform.mac_ver()[0].split('.')[0] or 0)
-    if major < 26:
-        raise BuildError(f'needs macOS 26 or later (Metal 4); this is macOS {platform.mac_ver()[0]}')
+    target = getattr(args, 'platform', 'macos') if args is not None else 'macos'
+    _check_host_platform(target, platform.system(), platform.machine(), platform.mac_ver()[0])
+    if target == 'ios':
+        check_ios_xcode_toolchain()
     if subprocess.run(['xcrun', '--find', 'clang'], capture_output=True).returncode:
         raise BuildError('the Xcode command line tools are missing: xcode-select --install')
     # SPIRV-Cross is C++: without the SDK's libc++ headers the build stops much later at "'string' file not found" (#41)
@@ -292,10 +354,11 @@ def prerequisites(args):
                          'With Xcode: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer; with the command line '
                          'tools only: sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install '
                          f'(xcode-select -p and xcrun --show-sdk-path show what is used). clang++ said: {cxx.stderr.strip()[:300]}')
-    brew = Path('/opt/homebrew')
-    missing = [p for p in ('opus', 'libvpx') if not (brew / 'opt' / p / 'lib').is_dir()]
-    if missing:
-        raise BuildError(f'Homebrew packages missing: brew install {" ".join(missing)}')
+    if target == 'macos':
+        brew = Path('/opt/homebrew' if platform.machine() == 'arm64' else '/usr/local')
+        missing = [p for p in ('opus', 'libvpx') if not (brew / 'opt' / p / 'lib').is_dir()]
+        if missing:
+            raise BuildError(f'Homebrew packages missing: brew install {" ".join(missing)}')
     if not shutil.which('git', path=os.pathsep.join(TOOL_PATHS + ['/usr/bin'])):
         raise BuildError('git not found: xcode-select --install')
     py = next((p for p in (shutil.which(n, path=os.pathsep.join(TOOL_PATHS)) for n in ('python3.14', 'python3.15')) if p), None)
@@ -591,7 +654,7 @@ def step_code(tree, game, keys, env, logs, *, version="v0", mod=None):
         target = merged['rewritten_main_sha256'] if modded else expected['rewritten_sha256'][f'{name}.patched.bin']
         if image.exists() and target and sha256(image) == target:
             continue
-        say(f'1/4 code: rewriting {name} for Apple silicon' + (' (the big one: about a minute)' if name == 'main' else ''))
+        say(f'1/4 code: rewriting {name} for ARM64' + (' (the big one: about a minute)' if name == 'main' else ''))
         run([py, 'third_party/d2r/patch_nso.py', source, out, name], logs / f'rewrite_{version}_{name}.log', cwd=tree,
             env=dict(env, DM_RULESET='native', DM_PRIVATE_GATES='0'))
         if modded:
@@ -794,9 +857,60 @@ def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None, mod=N
                 logs / f'output_res_overlay-{size}.log', cwd=tree)
 
 
+_HACTOOL_AMD64_MULADDC_SELECTOR = '#if defined(__amd64__) || defined (__x86_64__)'
+_HACTOOL_PORTABLE_MULADDC_SELECTOR = (
+    '#if 0 /* MNG Intel workaround: use the portable mbedTLS MULADDC implementation */'
+)
+_HACTOOL_INTEL_BIGNUM_CACHE_MARKER = 'portable-muladdc-v1\n'
+
+
+def patch_hactool_intel_bignum(source, machine=None):
+    """Select mbedTLS's portable MPI multiply on Intel Macs and invalidate only its stale outputs."""
+    machine = machine or platform.machine()
+    if host_architecture(machine) != 'x86_64':
+        return False
+
+    header = source / 'mbedtls/include/mbedtls/bn_mul.h'
+    try:
+        text = header.read_text()
+    except OSError as error:
+        raise BuildError(f'pinned hactool mbedTLS multiply selector is missing: {header}') from error
+
+    original_count = text.count(_HACTOOL_AMD64_MULADDC_SELECTOR)
+    patched_count = text.count(_HACTOOL_PORTABLE_MULADDC_SELECTOR)
+    if original_count == 1 and patched_count == 0:
+        header.write_text(text.replace(_HACTOOL_AMD64_MULADDC_SELECTOR,
+                                       _HACTOOL_PORTABLE_MULADDC_SELECTOR, 1))
+        selector_changed = True
+    elif original_count == 0 and patched_count == 1:
+        selector_changed = False
+    else:
+        raise BuildError('pinned hactool mbedTLS x86_64 MULADDC selector changed')
+
+    marker = source / '.mng-intel-portable-bignum-v1'
+    try:
+        marker_valid = marker.read_text() == _HACTOOL_INTEL_BIGNUM_CACHE_MARKER
+    except OSError:
+        marker_valid = False
+
+    if selector_changed or not marker_valid:
+        # The upstream makefiles do not track bn_mul.h as a bignum.o dependency. Rebuild
+        # only that object and its downstream archive/executable; keep every other cache.
+        for artifact in (source / 'mbedtls/library/bignum.o',
+                         source / 'mbedtls/library/libmbedcrypto.a',
+                         source / 'mbedtls/library/libmbedcrypto.dylib',
+                         source / 'mbedtls/library/libmbedcrypto.so',
+                         source / 'hactool'):
+            artifact.unlink(missing_ok=True)
+        marker.write_text(_HACTOOL_INTEL_BIGNUM_CACHE_MARKER)
+        return True
+    return False
+
+
 def build_hactool(tree, logs):
     source = tree.parent / 'src/hactool'
     git_fetch(*HACTOOL, source, logs/'fetch-hactool.log')
+    patch_hactool_intel_bignum(source)
     # Add an explicit private title-key file, so base NSP and update tickets do not
     # need command-line keys or changes to the player's HOME/.switch files.
     main = source/'main.c'
@@ -935,23 +1049,31 @@ def build_spirv_cross(tree, logs):
     src, out = tree / 'tooling/spirv-cross', tree / 'build/spirv-cross'
     objs = out / 'obj'
     objs.mkdir(parents=True, exist_ok=True)
+    arch = host_architecture()
 
     def compile_one(name):
-        run(['xcrun', 'clang++', *SPIRV_CROSS_FLAGS, '-c', src / name, '-o', objs / (name + '.o')],
+        run(['xcrun', 'clang++', *SPIRV_CROSS_FLAGS, '-arch', arch, '-c', src / name, '-o', objs / (name + '.o')],
             logs / 'spirv-cross' / (name + '.log'), quiet=False)
     with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
         list(pool.map(compile_one, SPIRV_CROSS_SOURCES))
-    run(['xcrun', 'clang++', '-arch', 'arm64', *[objs / (n + '.o') for n in SPIRV_CROSS_SOURCES], '-o', out / 'spirv-cross'],
+    run(['xcrun', 'clang++', '-arch', arch, *[objs / (n + '.o') for n in SPIRV_CROSS_SOURCES], '-o', out / 'spirv-cross'],
         logs / 'spirv-cross' / 'link.log', quiet=False)
 
 
-def check_translator(tree):
-    """The shader translation service: a native program in this repository (no .NET needed to build or to play)."""
-    translator = tree / 'prebuilt/macos-arm64/totk_xlate'
-    want = (translator.parent / 'totk_xlate.sha256').read_text().strip()
-    if not translator.is_file() or sha256(translator) != want:
-        raise BuildError(f'{translator}: not the shader translator this repository ships (its SHA-256 differs from '
-                         f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')
+def check_translator(tree, arch=None):
+    """The SHA-256-verified shader translator built for this host architecture."""
+    translator = translator_path(tree, arch)
+    digest_file = translator.parent / 'totk_xlate.sha256'
+    build_hint = ('check out the matching prebuilt folder, or build it on this Mac with '
+                  'games/totk/tools/totk_xlate/publish_native.sh (requires the .NET 10 SDK and network access on first use)')
+    try:
+        want = digest_file.read_text().strip()
+    except OSError:
+        want = ''
+    if not translator.is_file():
+        raise BuildError(f'{translator}: the host shader translator is missing; {build_hint}')
+    if not re.fullmatch(r'[0-9a-f]{64}', want) or sha256(translator) != want:
+        raise BuildError(f'{translator}: not the SHA-256-verified shader translator this repository ships; {build_hint}')
     return translator
 
 
@@ -1096,11 +1218,15 @@ def build_warm_tool(tree, logs, env):
          '-framework', 'Foundation', '-o', 'build/warm-metal-cache'], logs / 'warm-metal-cache-build.log', cwd=tree, env=env)
 
 
-def step_binary(tree, game, keys, env, logs, *, version="v0", title='0100f2c0115b6000'):
-    say('4/4 app: building the game binary and the launcher')
-    run(['make', f'-j{os.cpu_count() or 4}', 'runtime' if version == 'v0' else f'runtime-{version}'], logs / 'runtime.log', cwd=tree, env=env)
-    build_launcher(tree, version, logs, env)
-    build_warm_tool(tree, logs, env)
+def step_binary(tree, game, keys, env, logs, *, version="v0", title='0100f2c0115b6000', device_app=False):
+    if device_app:
+        say('4/4 app: preparing device game data and icon (the device exporter builds the runtime)')
+        run(['make', f'game-data-{version}'], logs / 'game-data.log', cwd=tree, env=env)
+    else:
+        say('4/4 app: building the game binary and the launcher')
+        run(['make', f'-j{os.cpu_count() or 4}', 'runtime' if version == 'v0' else f'runtime-{version}'], logs / 'runtime.log', cwd=tree, env=env)
+        build_launcher(tree, version, logs, env)
+        build_warm_tool(tree, logs, env)
     if not (tree / 'build/AppIcon.icns').exists():   # the game's own icon from its control data; optional
         try:
             run([tree / '.venv/bin/python', 'scripts/extract_app_icon.py', game, '--keys', keys, '--title', title, '--output', 'build/AppIcon.icns'],
@@ -1737,7 +1863,7 @@ def step_code_botw(tree, botw, game, keys, env, logs, *, version='botw160'):
         image, h = out / f'{name}.patched.bin', expected['rewritten_sha256'][f'{name}.patched.bin']
         if image.exists() and sha256(image) == h:
             continue
-        say(f'1/4 code: rewriting {name} for Apple silicon' + (' (the big one: about a minute)' if name == 'main' else ''))
+        say(f'1/4 code: rewriting {name} for ARM64' + (' (the big one: about a minute)' if name == 'main' else ''))
         run([py, 'third_party/d2r/patch_nso.py', exefs / name, out, name], logs / f'rewrite_{version}_{name}.log', cwd=tree,
             env=dict(env, DM_RULESET='native', DM_PRIVATE_GATES='0'))
         check(f'rewritten {name}', sha256(image), h)
@@ -1831,11 +1957,7 @@ def step_shaders_botw(tree, botw, logs, *, version='botw160'):
     if not (tree / 'build/spirv-cross/spirv-cross').exists():
         say('3/4 shaders: building SPIRV-Cross with clang')
         build_spirv_cross(tree, logs)
-    translator = tree / 'prebuilt/macos-arm64/totk_xlate'
-    want = (translator.parent / 'totk_xlate.sha256').read_text().strip()
-    if not translator.is_file() or sha256(translator) != want:
-        raise BuildError(f'{translator}: not the shader translator this repository ships (its SHA-256 differs from '
-                         f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')
+    translator = check_translator(tree)
     seed = tree / f'build/shader-seed/{version}'
     say('3/4 shaders: preparing the startup shaders from the game data and the shared shader list (a few minutes)')
     run([tree / '.venv/bin/python', botw / 'scripts/prepare_shader_seed.py', '--romfs', tree / f'extracted/{version}/romfs',
@@ -1978,9 +2100,11 @@ def main(argv):
         step_code_botw(tree, botw, update or game, keys, env, logs, version=version)
         step_data_botw(tree, botw, game, keys, logs, version=version, update=update, dlc=dlcs, firmware=firmware, shared_fonts=shared_fonts)
         step_shaders_botw(tree, botw, logs, version=version)
-        step_shader_libs(tree, logs, version=version)
+        if not device_app:
+            step_shader_libs(tree, logs, version=version)
         # The work folder's copy of games/botw (prepare_work), relative: make splits a path with spaces into several targets
-        step_binary(tree, game, keys, {**env, 'SHADER_LIST': '../botw/assets/shader_list.tsv'}, logs, version=version, title='01007ef00011e000')
+        step_binary(tree, game, keys, {**env, 'SHADER_LIST': '../botw/assets/shader_list.tsv'}, logs, version=version,
+                    title='01007ef00011e000', device_app=device_app)
         say(f'4/4 app: assembling {out}')
         if device_app:   # the same IPA tooling as Tears of the Kingdom (ios/tools/build_ipa.py --version botw160 / botw190)
             run([py, 'ios/tools/build_ipa.py', '--tree', tree, '--out', out, '--version', version,
@@ -2041,8 +2165,9 @@ def main(argv):
     if mod:
         check_mod_overlays(tree, mod, version)
     step_shaders(tree, logs, version=version)
-    step_shader_libs(tree, logs, version=version)
-    step_binary(tree, game, keys, env, logs, version=version)
+    if not device_app:
+        step_shader_libs(tree, logs, version=version)
+    step_binary(tree, game, keys, env, logs, version=version, device_app=device_app)
     say(f'4/4 app: assembling {out}')
     if device_app:
         run([py, 'ios/tools/build_ipa.py', '--tree', tree, '--out', out, '--version', version,

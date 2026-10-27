@@ -245,23 +245,49 @@ static void audio_observe(void) {
                                              : @"No game data. On the Mac, copy it to Files › On My iPhone › %@ › GameData with ios/tools/install_device.py --game-data."), app];
         fprintf(stderr, "[totk] no game image: %s\n", g_no_game_data.UTF8String);
     }
-    /* The startup shaders likewise (build_app.py --ios-game-data documents): install_device.py puts the seed into its own
-       folder in Documents/GameData once per content and writes shader-seed.txt last ("<folder>\n<fingerprint>"), so the app
-       carries none and a new build installs in seconds. Read in place like the app's own (totk_shader_seed.h); folders of
-       earlier seeds are removed in the background. Without either seed the game has no shaders: said on the screen. */
+    /* The startup shaders likewise (build_app.py --ios-game-data documents): install_device.py writes packed parts into
+       Documents and writes shader-seed.txt in Documents/GameData last ("<folder>\n<fingerprint>"). Unpack into a directory
+       created by the app in Documents/shader-seeds: devicectl-created Documents/GameData can be root-owned and unwritable.
+       Existing completed seeds and packs in GameData remain readable for installs made by older versions. */
     NSString *seedDir = [res stringByAppendingPathComponent:@"shader-seed"];
     NSArray<NSString *> *seedMark = [[NSString stringWithContentsOfFile:[gameData stringByAppendingPathComponent:@"shader-seed.txt"] encoding:NSUTF8StringEncoding error:nil] componentsSeparatedByString:@"\n"];
-    NSString *pushedName = seedMark.count >= 2 && seedMark[1].length == 64 && [seedMark[0] hasPrefix:@"shader-seed-"] && ![seedMark[0] containsString:@"/"] ? seedMark[0] : nil;
-    NSString *pushed = pushedName ? [gameData stringByAppendingPathComponent:pushedName] : nil;
-    BOOL packed = pushed && ![fm fileExistsAtPath:[pushed stringByAppendingPathComponent:@"seed-manifest.json"]] &&
-                  [fm fileExistsAtPath:[pushed stringByAppendingString:@".pack.000"]];
-    if (packed) { g_seed_pack = [pushed stringByAppendingString:@".pack"]; g_seed_unpack_to = pushed; }   // unpacked in viewDidAppear
-    if (pushed && (packed || [fm fileExistsAtPath:[pushed stringByAppendingPathComponent:@"seed-manifest.json"]])) {
+    NSString *pushedName = seedMark.count >= 2 && seedMark[1].length == 64 && [seedMark[0] hasPrefix:@"shader-seed-"] &&
+                           ![seedMark[0] containsString:@"/"] && ![seedMark[0] containsString:@"\\"] ? seedMark[0] : nil;
+    NSString *seedRoot = [docs stringByAppendingPathComponent:@"shader-seeds"];
+    NSString *pushed = nil, *pack = nil;
+    if (pushedName) {
+        // Prefer the app-owned destination from this version, then a completed seed directly under Documents, then the
+        // legacy GameData folder. A manifest marks a complete unpack; a pack is only a candidate after all copies finish.
+        NSArray<NSString *> *complete = @[[seedRoot stringByAppendingPathComponent:pushedName],
+                                           [docs stringByAppendingPathComponent:pushedName],
+                                           [gameData stringByAppendingPathComponent:pushedName]];
+        for (NSString *candidate in complete)
+            if ([fm fileExistsAtPath:[candidate stringByAppendingPathComponent:@"seed-manifest.json"]]) { pushed = candidate; break; }
+        if (!pushed) {
+            NSString *inDocuments = [docs stringByAppendingString:@"/"];
+            NSString *inGameData = [gameData stringByAppendingString:@"/"];
+            NSString *base = [pushedName stringByAppendingString:@".pack"];
+            if ([fm fileExistsAtPath:[inDocuments stringByAppendingString:[base stringByAppendingString:@".000"]]]) pack = [inDocuments stringByAppendingString:base];
+            else if ([fm fileExistsAtPath:[inGameData stringByAppendingString:[base stringByAppendingString:@".000"]]]) pack = [inGameData stringByAppendingString:base];
+            if (pack) { pushed = [seedRoot stringByAppendingPathComponent:pushedName]; g_seed_pack = pack; g_seed_unpack_to = pushed; }
+        }
+    }
+    if (pushed) {
         seedDir = pushed; setenv("TOTK_SHADER_SEED_PUSHED", pushed.fileSystemRepresentation, 1);
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
             NSFileManager *files = [NSFileManager new];
-            for (NSString *name in [files contentsOfDirectoryAtPath:gameData error:nil] ?: @[])
-                if ([name hasPrefix:@"shader-seed-"] && ![name hasPrefix:pushedName]) [files removeItemAtPath:[gameData stringByAppendingPathComponent:name] error:nil];
+            for (NSString *root in @[gameData, seedRoot])
+                for (NSString *name in [files contentsOfDirectoryAtPath:root error:nil] ?: @[]) {
+                    // Only remove completed old seed directories. Keep the current seed and its in-progress .tmp directory,
+                    // and leave old read-only packs alone; their deletion is not needed for startup.
+                    if (![name hasPrefix:@"shader-seed-"] || [name isEqualToString:pushedName] ||
+                        [name isEqualToString:[pushedName stringByAppendingString:@".tmp"]]) continue;
+                    NSString *old = [root stringByAppendingPathComponent:name];
+                    BOOL isDir = NO;
+                    if ([files fileExistsAtPath:old isDirectory:&isDir] && isDir &&
+                        [files fileExistsAtPath:[old stringByAppendingPathComponent:@"seed-manifest.json"]])
+                        [files removeItemAtPath:old error:nil];
+                }
         });
     } else if (!g_no_game_data && ![fm fileExistsAtPath:[seedDir stringByAppendingPathComponent:@"seed-manifest.json"]]) {
         BOOL zh = [NSLocale.preferredLanguages.firstObject hasPrefix:@"zh"];

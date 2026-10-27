@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <stdatomic.h>
 #include "game_patches.h"
 #include "game_version.h"
 #include "aspect_math.h"   /* the aspect ratio: TOTK_ASPECT parsing */
@@ -497,7 +498,9 @@ static const struct { uint32_t off, word; const char *what; } g_jq_site[JQ_SITES
 static uint8_t *g_jq_main; static int g_jq_on;
 static struct { _Atomic uint64_t thread, job, jq, since; _Atomic uint32_t index, handle; } g_jq_run[64];
 static _Atomic uint64_t g_jq_n, g_jq_bad, g_jq_dup, g_sync_waits, g_sync_busy, g_sync_end_busy, g_wake_skip_busy;
+#if !defined(TOTK_EXPORT_ONLY)
 static struct { uint32_t state, status, ring; uint64_t jq; } g_pre[64];   /* per thread slot (no __thread: its first use may allocate) */
+#endif
 /* Exclusive loads with acquire (TOTK_EXCL_ACQUIRE, botw.md): sead's spin locks in this game take the lock with a plain
    ldxr / stxr and only put a dmb ish before the release, so nothing orders the loads inside the critical section after the
    lock is taken. The ARMv8 model lets such a load be satisfied before the ldxr observes the lock free (a control dependency
@@ -601,18 +604,21 @@ void runtime_game_patches(Module *m) {
           if (!w) fprintf(stderr, "[botw] exclusive loads with acquire: set at build time (iOS), none left\n"); else
           fprintf(stderr, "[botw] exclusive loads with acquire: %u in the code, %u in the rewriter's patch area (TOTK_EXCL_ACQUIRE=0: as shipped)\n", t, p);
       } else fprintf(stderr, "[botw] exclusive loads as shipped (TOTK_EXCL_ACQUIRE=0)\n"); }
+    #if !defined(TOTK_EXPORT_ONLY)
     const char *e = getenv("TOTK_JQ_CHECK"); if (!e || !*e || !strcmp(e, "0") || ios_code()) return;
     for (int i = 0; i < JQ_SITES; i++) { uint32_t w; memcpy(&w, m->base + g_jq_site[i].off, 4);
         if (w != g_jq_site[i].word) { fprintf(stderr, "[botw] TOTK_JQ_CHECK: main+%#x is %08x, not %08x (%s): not armed\n", g_jq_site[i].off, w, g_jq_site[i].word, g_jq_site[i].what); return; } }
     for (int i = 0; i < JQ_SITES; i++) { uint32_t b = 0xd4200000u | ((0x7a1u + (uint32_t)i) << 5); memcpy(m->base + g_jq_site[i].off, &b, 4); }
     g_jq_main = m->base; g_jq_on = 1;
     fprintf(stderr, "[botw] TOTK_JQ_CHECK: job-queue and worker sync checks armed at %d sites\n", JQ_SITES);
+    #endif
 }
 static int jq_slot(uint64_t th) {
     for (int k = 0; k < 64; k++) if (atomic_load(&g_jq_run[k].thread) == th) return k;
     for (int k = 0; k < 64; k++) { uint64_t z = 0; if (atomic_compare_exchange_strong(&g_jq_run[k].thread, &z, th)) return k; }
     return -1;
 }
+#if !defined(TOTK_EXPORT_ONLY)
 static double jq_ms(uint64_t since) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return since ? (double)(mach_absolute_time() - since) * tb.numer / tb.denom / 1e6 : -1; }
 #define U32(a) (*(const uint32_t *)(uintptr_t)(a))
 #define U64(a) (*(const uint64_t *)(uintptr_t)(a))
@@ -711,6 +717,7 @@ int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was
 }
 #undef U32
 #undef U64
+#endif /* !TOTK_EXPORT_ONLY: these signal-context diagnostics require ARM guest registers. */
 int runtime_render_res(unsigned *w, unsigned *h) { (void)w; (void)h; return 0; }   /* no scene size above 1600x900 for the heaps (romfs.c) */
 #ifdef GAME_BOTW160
 /* Output size, 1.6.0: key 3 cycles off -> MetalFX 2K -> native 2K -> off, as on Tears of the Kingdom 1.4.3 (user
