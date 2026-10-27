@@ -24,6 +24,8 @@ targets:
       - path: ../runtime/loader.c
         compilerFlags: "-Dmain=totk_host_main"
     dependencies:
+      - sdk: AVFoundation.framework   # AVQueuePlayer / AVPlayerLooper for the optional title-screen video
+      - sdk: CoreMedia.framework      # CMTimeGetSeconds for menu video timing
       - sdk: CoreHaptics.framework   # the iPhone's Taptic Engine while the touch controls are used
       - sdk: CoreMotion.framework    # the iPhone's own gyro while the touch controls are used
     info:

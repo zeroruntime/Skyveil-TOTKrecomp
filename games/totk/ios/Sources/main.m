@@ -12,6 +12,9 @@
 #include "runtime.h"
 #include "dmsh_chain.h"
 #import "touch_pad.h"
+#if !TARGET_OS_VISION && !defined(GAME_BOTW)
+#import "main_menu.h"
+#endif
 
 int totk_host_main(int argc, char **argv);
 void runtime_ios_attach_layer(CAMetalLayer *layer, UIView *host);
@@ -156,7 +159,20 @@ void runtime_settings_toggle(void) {}
     (void)session; (void)options;
     if (![scene isKindOfClass:UIWindowScene.class]) return;
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
-    self.window.rootViewController = [TOTKGameController new]; [self.window makeKeyAndVisible];
+#if !TARGET_OS_VISION && !defined(GAME_BOTW)
+    TOTKMainMenuController *menu = [TOTKMainMenuController new];
+    __weak TOTKSceneDelegate *weakSelf = self;
+    menu.playHandler = ^{
+        TOTKSceneDelegate *strongSelf = weakSelf;
+        if (!strongSelf.window) return;
+        TOTKGameController *game = [TOTKGameController new];
+        strongSelf.window.rootViewController = game;
+    };
+    self.window.rootViewController = menu;
+#else
+    self.window.rootViewController = [TOTKGameController new];
+#endif
+    [self.window makeKeyAndVisible];
 #if TARGET_OS_VISION
     UIWindowSceneGeometryPreferencesVision *prefs = [[UIWindowSceneGeometryPreferencesVision alloc] initWithSize:CGSizeMake(1280, 720)];
     prefs.resizingRestrictions = UIWindowSceneResizingRestrictionsUniform;

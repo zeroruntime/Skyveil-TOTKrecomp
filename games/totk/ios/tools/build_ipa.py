@@ -57,6 +57,27 @@ def project_for_platform(project, platform):
         project=project.replace(old,new)
     return project
 
+MENU_VIDEO_NAME = 'totk_menu_video.mp4'
+
+def resolve_menu_video(path):
+    """Validate an explicitly supplied menu video before doing any expensive build work."""
+    if path is None: return None
+    path = Path(path).expanduser().resolve()
+    if not path.is_file(): raise RuntimeError(f'--menu-video must name an existing file: {path}')
+    if path.name != MENU_VIDEO_NAME:
+        raise RuntimeError(f'--menu-video must be named {MENU_VIDEO_NAME}: {path}')
+    return path
+
+def project_with_menu_video(project, menu_video, *, platform, is_botw):
+    """Add the optional TOTK iOS video as a bundled Xcode resource."""
+    if menu_video is None: return project
+    menu_video = resolve_menu_video(menu_video)
+    if platform != 'ios' or is_botw: return project
+    anchor = '      - Sources\n'
+    if anchor not in project: raise RuntimeError('project.yml no longer has the TOTK Sources entry')
+    resource = f'      - path: {json.dumps(str(menu_video))}\n        buildPhase: resources\n'
+    return project.replace(anchor, anchor + resource, 1)
+
 def seed_reusable(seed, source_hash, source_files, sdk):
     manifest=seed/'seed-manifest.json'
     if not manifest.is_file(): return False
@@ -72,8 +93,10 @@ def main():
     p.add_argument('--tree',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
     p.add_argument('--version',choices=['v0','v112','v121','v143','botw160','botw190'],required=True);p.add_argument('--logs',type=Path,required=True)
     p.add_argument('--platform',choices=['ios','visionos'],default='ios')
+    p.add_argument('--menu-video', type=Path,
+                   help=f'optional menu video resource (must be named {MENU_VIDEO_NAME}; TOTK iOS only)')
     p.add_argument('--image-outside',action='store_true',help='leave romfs.bin out: the device keeps it in Documents/GameData');p.add_argument('--app-name',default='Tears of the Kingdom');p.add_argument('--bundle-id',default='org.macnativegames.totk')
-    a=p.parse_args(); tree=a.tree.resolve(); ios=tree/'ios';gen=ios/'Gen';logs=a.logs.resolve(); out=a.out.resolve()
+    a=p.parse_args(); menu_video=resolve_menu_video(a.menu_video); tree=a.tree.resolve(); ios=tree/'ios';gen=ios/'Gen';logs=a.logs.resolve(); out=a.out.resolve()
     if out.suffix.lower() not in ('.ipa','.app'): raise RuntimeError('iOS output path must end in .ipa (or .app: the unsigned folder)')
     env=dict(os.environ,DEVELOPER_DIR=developer_dir())
     vision=a.platform=='visionos'; sdk_name='xros' if vision else 'iphoneos'
@@ -119,6 +142,7 @@ def main():
                                                          'info':{'author':'xcode','version':1}}))
         project=project.replace('      - path: Gen/embed.S\n','      - path: Gen/embed.S\n      - path: Gen/Assets.xcassets\n')
         project=project.replace('      CODE_SIGN_STYLE: Manual\n','      CODE_SIGN_STYLE: Manual\n      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon\n')
+    project=project_with_menu_video(project,menu_video,platform=a.platform,is_botw=botw)
     (ios/'project.generated.yml').write_text(project)
     # Build device dependencies separately: Homebrew's Mac archives cannot be linked into an iOS application.
     deps=tree/('build/xros-deps' if vision else 'build/ios-deps')

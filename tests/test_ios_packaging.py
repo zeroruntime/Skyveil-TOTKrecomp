@@ -1,4 +1,5 @@
 """games/totk/ios/tools/build_ipa.py: what an iOS build leaves out of the way and copies (2026-10-23)."""
+import json
 import sys
 import tempfile
 import time
@@ -7,9 +8,12 @@ from pathlib import Path
 from unittest import mock
 
 TOOLS = Path(__file__).resolve().parents[1]/'games/totk/ios/tools'
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
+sys.path.insert(0, str(ROOT))
 import build_ipa  # noqa: E402
 import install_device  # noqa: E402
+import build_app  # noqa: E402
 
 
 class Discard(unittest.TestCase):
@@ -166,6 +170,44 @@ class FullHD(unittest.TestCase):
         build = (TOOLS/'build_ipa.py').read_text()
         self.assertIn("s.get('Key')=='TOTK_DOCKED'", build)
         self.assertIn("'      - path: Gen/Settings.bundle'", build)
+
+
+class MenuVideo(unittest.TestCase):
+    def test_video_is_added_as_a_quoted_resource_for_totk_ios(self):
+        with tempfile.TemporaryDirectory() as d:
+            video = Path(d)/'folder with "quotes" #1'/'totk_menu_video.mp4'
+            video.parent.mkdir(); video.write_bytes(b'video')
+            source = 'targets:\n  TOTKIOS:\n    sources:\n      - Sources\n'
+            generated = build_ipa.project_with_menu_video(source, video, platform='ios', is_botw=False)
+            self.assertIn(f'      - path: {json.dumps(str(video.resolve()))}\n', generated)
+            self.assertIn('        buildPhase: resources\n', generated)
+            self.assertEqual(generated.count('totk_menu_video.mp4'), 1)
+
+    def test_video_is_excluded_for_visionos_and_botw(self):
+        with tempfile.TemporaryDirectory() as d:
+            video = Path(d)/'totk_menu_video.mp4'; video.write_bytes(b'video')
+            source = 'targets:\n  TOTKIOS:\n    sources:\n      - Sources\n'
+            for platform, is_botw in (('visionos', False), ('ios', True)):
+                with self.subTest(platform=platform, is_botw=is_botw):
+                    self.assertEqual(build_ipa.project_with_menu_video(
+                        source, video, platform=platform, is_botw=is_botw), source)
+
+    def test_missing_explicit_video_fails_and_absent_optional_video_is_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d)/'totk_menu_video.mp4'
+            with self.assertRaisesRegex(RuntimeError, '--menu-video must name an existing file'):
+                build_ipa.resolve_menu_video(missing)
+            self.assertIsNone(build_ipa.resolve_menu_video(None))
+
+    def test_default_asset_is_passed_only_for_totk_ios_when_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); video = root/'game_essentials/totk_menu_video.mp4'
+            video.parent.mkdir(); video.write_bytes(b'video')
+            self.assertEqual(build_app.ios_menu_video_args('totk', 'ios', root),
+                             ['--menu-video', str(video.resolve())])
+            self.assertEqual(build_app.ios_menu_video_args('totk', 'visionos', root), [])
+            self.assertEqual(build_app.ios_menu_video_args('botw', 'ios', root), [])
+            self.assertEqual(build_app.ios_menu_video_args('totk', 'ios', root/'missing'), [])
 
 
 if __name__ == '__main__':
