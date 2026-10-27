@@ -2,6 +2,9 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <math.h>
+#import <stdlib.h>
+#import "phone_settings.h"
+#import "runtime.h"
 
 @interface TOTKMainMenuController ()
 @property(nonatomic, strong) AVQueuePlayer *player;
@@ -10,6 +13,7 @@
 @property(nonatomic, strong) CAGradientLayer *legibilityGradient;
 @property(nonatomic, strong) UIButton *playButton;
 @property(nonatomic, strong) UIButton *settingsButton;
+@property(nonatomic, strong) UIControl *settingsOverlay;
 @property(nonatomic) CGSize videoSize;
 @property(nonatomic) NSUInteger playbackGeneration;
 @property(nonatomic) BOOL leavingForGame;
@@ -230,7 +234,7 @@
 
 - (void)playTapped:(UIButton *)sender {
     (void)sender;
-    if (self.leavingForGame) return;
+    if (self.leavingForGame || self.settingsOverlay) return;
     self.leavingForGame = YES;
     self.playButton.enabled = NO;
     self.settingsButton.enabled = NO;
@@ -241,14 +245,284 @@
     if (playHandler) playHandler();
 }
 
+- (BOOL)canBecomeFirstResponder { return YES; }
+
+- (NSArray<UIKeyCommand *> *)keyCommands {
+    if (!self.settingsOverlay) return @[];
+    return @[[UIKeyCommand keyCommandWithInput:UIKeyInputEscape
+                                 modifierFlags:0
+                                        action:@selector(closeSettingsFromKeyboard:)]];
+}
+
 - (void)settingsTapped:(UIButton *)sender {
     (void)sender;
-    if (self.leavingForGame || self.presentedViewController) return;
-    UIAlertController *settings = [UIAlertController alertControllerWithTitle:@"Settings"
-                                                                      message:@"Controls and additional options will be available in a future update."
-                                                               preferredStyle:UIAlertControllerStyleAlert];
-    [settings addAction:[UIAlertAction actionWithTitle:@"Done" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:settings animated:YES completion:nil];
+    if (self.leavingForGame || self.settingsOverlay) return;
+    [self openSettingsPanel];
+}
+
+- (void)openSettingsPanel {
+    if (self.leavingForGame || self.settingsOverlay) return;
+
+    UIColor *cream = [UIColor colorWithRed:0.94 green:0.92 blue:0.84 alpha:1.0];
+    UIColor *gold = [UIColor colorWithRed:0.89 green:0.75 blue:0.48 alpha:1.0];
+    UIColor *dark = [UIColor colorWithRed:0.055 green:0.07 blue:0.06 alpha:1.0];
+
+    UIControl *overlay = [UIControl new];
+    overlay.translatesAutoresizingMaskIntoConstraints = NO;
+    overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.64];
+    overlay.accessibilityViewIsModal = YES;
+    overlay.isAccessibilityElement = NO;
+    [overlay addTarget:self action:@selector(settingsScrimTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:overlay];
+    [NSLayoutConstraint activateConstraints:@[
+        [overlay.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [overlay.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [overlay.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [overlay.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
+    ]];
+    self.settingsOverlay = overlay;
+    self.playButton.accessibilityElementsHidden = YES;
+    self.settingsButton.accessibilityElementsHidden = YES;
+
+    UIView *card = [UIView new];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.backgroundColor = [UIColor colorWithRed:0.035 green:0.05 blue:0.043 alpha:0.96];
+    card.layer.cornerRadius = 12;
+    card.layer.borderWidth = 1;
+    card.layer.borderColor = [gold colorWithAlphaComponent:0.58].CGColor;
+    card.layer.shadowColor = UIColor.blackColor.CGColor;
+    card.layer.shadowOpacity = 0.38;
+    card.layer.shadowRadius = 24;
+    card.layer.shadowOffset = CGSizeMake(0, 8);
+    [overlay addSubview:card];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    NSLayoutConstraint *preferredWidth = [card.widthAnchor constraintEqualToConstant:640];
+    preferredWidth.priority = 999;
+    NSLayoutConstraint *preferredHeight = [card.heightAnchor constraintEqualToConstant:500];
+    preferredHeight.priority = 999;
+    [NSLayoutConstraint activateConstraints:@[
+        [card.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [card.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
+        preferredWidth,
+        [card.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-32],
+        [card.heightAnchor constraintLessThanOrEqualToAnchor:safe.heightAnchor constant:-24],
+        preferredHeight
+    ]];
+
+    UILabel *title = [UILabel new];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    title.text = @"Settings";
+    title.font = [UIFont fontWithName:@"Georgia" size:26] ?: [UIFont systemFontOfSize:26 weight:UIFontWeightSemibold];
+    title.textColor = gold;
+    title.accessibilityTraits = UIAccessibilityTraitHeader;
+
+    UILabel *fpsTitle = [self settingsLabel:@"Phone frame rate" font:[UIFont systemFontOfSize:20 weight:UIFontWeightSemibold] color:cream];
+    UILabel *fpsDescription = [self settingsLabel:@"30 FPS holds at 30. Up to 60 FPS is a cap, not a guarantee; demanding scenes may run slower."
+                                               font:[UIFont systemFontOfSize:18] color:[cream colorWithAlphaComponent:0.82]];
+    fpsDescription.numberOfLines = 0;
+    UIStackView *fpsLabels = [[UIStackView alloc] initWithArrangedSubviews:@[fpsTitle, fpsDescription]];
+    fpsLabels.axis = UILayoutConstraintAxisVertical;
+    fpsLabels.alignment = UIStackViewAlignmentFill;
+    fpsLabels.spacing = 5;
+
+    UISegmentedControl *frameRate = [[UISegmentedControl alloc] initWithItems:@[@"30 FPS", @"Up to 60"]];
+    frameRate.translatesAutoresizingMaskIntoConstraints = NO;
+    frameRate.selectedSegmentIndex = runtime_phone_fps() == 30 ? 0 : 1;
+    frameRate.selectedSegmentTintColor = gold;
+    frameRate.accessibilityLabel = @"Phone frame rate";
+    frameRate.accessibilityHint = @"Choose a 30 FPS cap or up to 60 FPS.";
+    [frameRate setTitleTextAttributes:@{NSForegroundColorAttributeName: cream,
+                                       NSFontAttributeName: [UIFont systemFontOfSize:15 weight:UIFontWeightMedium]}
+                              forState:UIControlStateNormal];
+    [frameRate setTitleTextAttributes:@{NSForegroundColorAttributeName: dark,
+                                       NSFontAttributeName: [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold]}
+                              forState:UIControlStateSelected];
+    [frameRate addTarget:self action:@selector(frameRateChanged:) forControlEvents:UIControlEventValueChanged];
+    [frameRate.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+
+    UIStackView *frameRateGroup = [[UIStackView alloc] initWithArrangedSubviews:@[fpsLabels, frameRate]];
+    frameRateGroup.axis = UILayoutConstraintAxisVertical;
+    frameRateGroup.alignment = UIStackViewAlignmentFill;
+    frameRateGroup.spacing = 10;
+
+    UIButton *gyroRow = [self makeSettingsToggleRowWithTitle:@"Phone gyro"
+                                                    detail:@"Uses phone motion controls when no controller is connected."
+                                                  isEnabled:totk_phone_setting_enabled(@"TOTK_PHONE_GYRO")
+                                                     tag:101
+                                                  action:@selector(gyroRowTapped:)];
+    UIButton *hapticsRow = [self makeSettingsToggleRowWithTitle:@"Phone vibration"
+                                                       detail:@"Uses phone vibration when no controller is connected."
+                                                     isEnabled:totk_phone_setting_enabled(@"TOTK_PHONE_HAPTICS")
+                                                        tag:102
+                                                     action:@selector(hapticsRowTapped:)];
+
+    UIStackView *settingsRows = [[UIStackView alloc] initWithArrangedSubviews:@[frameRateGroup, gyroRow, hapticsRow]];
+    settingsRows.axis = UILayoutConstraintAxisVertical;
+    settingsRows.alignment = UIStackViewAlignmentFill;
+    settingsRows.spacing = 14;
+    settingsRows.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIScrollView *scrollView = [UIScrollView new];
+    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    scrollView.showsVerticalScrollIndicator = YES;
+    scrollView.alwaysBounceVertical = NO;
+    scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    scrollView.accessibilityElementsHidden = NO;
+    scrollView.verticalScrollIndicatorInsets = UIEdgeInsetsMake(4, 0, 4, 0);
+    [scrollView addSubview:settingsRows];
+    [NSLayoutConstraint activateConstraints:@[
+        [settingsRows.leadingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.leadingAnchor],
+        [settingsRows.trailingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.trailingAnchor],
+        [settingsRows.topAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.topAnchor],
+        [settingsRows.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor],
+        [settingsRows.widthAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.widthAnchor]
+    ]];
+    [scrollView setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
+
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    close.translatesAutoresizingMaskIntoConstraints = NO;
+    [close setTitle:@"Close" forState:UIControlStateNormal];
+    [close setTitleColor:cream forState:UIControlStateNormal];
+    close.titleLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
+    close.backgroundColor = [UIColor colorWithRed:0.48 green:0.39 blue:0.21 alpha:0.24];
+    close.layer.borderWidth = 1;
+    close.layer.borderColor = [gold colorWithAlphaComponent:0.38].CGColor;
+    close.layer.cornerRadius = 8;
+    close.accessibilityLabel = @"Close settings";
+    close.accessibilityHint = @"Dismisses this panel and returns to the main menu.";
+    [close addTarget:self action:@selector(closeSettingsTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [close.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
+
+    UIStackView *panelContent = [[UIStackView alloc] initWithArrangedSubviews:@[title, scrollView, close]];
+    panelContent.translatesAutoresizingMaskIntoConstraints = NO;
+    panelContent.axis = UILayoutConstraintAxisVertical;
+    panelContent.alignment = UIStackViewAlignmentFill;
+    panelContent.spacing = 12;
+    [card addSubview:panelContent];
+    [NSLayoutConstraint activateConstraints:@[
+        [panelContent.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:22],
+        [panelContent.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-22],
+        [panelContent.topAnchor constraintEqualToAnchor:card.topAnchor constant:18],
+        [panelContent.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-18]
+    ]];
+
+    [self becomeFirstResponder];
+    UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, title);
+}
+
+- (UILabel *)settingsLabel:(NSString *)text font:(UIFont *)font color:(UIColor *)color {
+    UILabel *label = [UILabel new];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.text = text;
+    label.font = font;
+    label.textColor = color;
+    label.isAccessibilityElement = YES;
+    return label;
+}
+
+- (UIButton *)makeSettingsToggleRowWithTitle:(NSString *)title
+                                     detail:(NSString *)detail
+                                  isEnabled:(BOOL)isEnabled
+                                        tag:(NSInteger)tag
+                                     action:(SEL)action {
+    UIColor *cream = [UIColor colorWithRed:0.94 green:0.92 blue:0.84 alpha:1.0];
+    UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    row.backgroundColor = [UIColor colorWithWhite:1 alpha:0.035];
+    row.layer.cornerRadius = 8;
+    row.layer.borderWidth = 1;
+    row.layer.borderColor = [cream colorWithAlphaComponent:0.14].CGColor;
+    row.accessibilityLabel = title;
+    row.accessibilityValue = isEnabled ? @"On" : @"Off";
+    row.accessibilityHint = [NSString stringWithFormat:@"%@ Double-tap to turn %@.", detail, isEnabled ? @"off" : @"on"];
+    row.accessibilityTraits = UIAccessibilityTraitButton | (isEnabled ? UIAccessibilityTraitSelected : 0);
+    [row addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+
+    UILabel *name = [self settingsLabel:title font:[UIFont systemFontOfSize:20 weight:UIFontWeightSemibold] color:cream];
+    name.isAccessibilityElement = NO;
+    UILabel *description = [self settingsLabel:detail font:[UIFont systemFontOfSize:18] color:[cream colorWithAlphaComponent:0.78]];
+    description.numberOfLines = 0;
+    description.isAccessibilityElement = NO;
+    UIStackView *labels = [[UIStackView alloc] initWithArrangedSubviews:@[name, description]];
+    labels.translatesAutoresizingMaskIntoConstraints = NO;
+    labels.userInteractionEnabled = NO;
+    labels.axis = UILayoutConstraintAxisVertical;
+    labels.alignment = UIStackViewAlignmentFill;
+    labels.spacing = 4;
+    [row addSubview:labels];
+
+    UISwitch *toggle = [UISwitch new];
+    toggle.translatesAutoresizingMaskIntoConstraints = NO;
+    [toggle setOn:isEnabled animated:NO];
+    toggle.tag = tag;
+    toggle.userInteractionEnabled = NO;
+    toggle.isAccessibilityElement = NO;
+    [row addSubview:toggle];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [labels.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:16],
+        [labels.topAnchor constraintEqualToAnchor:row.topAnchor constant:12],
+        [labels.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:-12],
+        [labels.trailingAnchor constraintLessThanOrEqualToAnchor:toggle.leadingAnchor constant:-12],
+        [toggle.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-16],
+        [toggle.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:84]
+    ]];
+    return row;
+}
+
+- (void)frameRateChanged:(UISegmentedControl *)control {
+    int fps = control.selectedSegmentIndex == 0 ? 30 : 60;
+    runtime_phone_fps_set(fps);
+    [NSUserDefaults.standardUserDefaults setObject:(fps == 30 ? @"30" : @"60") forKey:@"TOTK_PHONE_FPS"];
+}
+
+- (void)gyroRowTapped:(UIButton *)row {
+    [self setPhoneToggleRow:row key:@"TOTK_PHONE_GYRO"];
+}
+
+- (void)hapticsRowTapped:(UIButton *)row {
+    [self setPhoneToggleRow:row key:@"TOTK_PHONE_HAPTICS"];
+}
+
+- (void)setPhoneToggleRow:(UIButton *)row key:(NSString *)key {
+    UISwitch *toggle = (UISwitch *)[row viewWithTag:([key isEqualToString:@"TOTK_PHONE_GYRO"] ? 101 : 102)];
+    if (!toggle) return;
+    BOOL enabled = !toggle.isOn;
+    [toggle setOn:enabled animated:YES];
+    [NSUserDefaults.standardUserDefaults setBool:enabled forKey:key];
+    setenv(key.UTF8String, enabled ? "1" : "0", 1);
+    row.accessibilityValue = enabled ? @"On" : @"Off";
+    row.accessibilityHint = [NSString stringWithFormat:@"%@ Double-tap to turn %@.",
+                             row.accessibilityLabel, enabled ? @"off" : @"on"];
+    row.accessibilityTraits = UIAccessibilityTraitButton | (enabled ? UIAccessibilityTraitSelected : 0);
+}
+
+- (void)settingsScrimTapped:(UIControl *)sender {
+    (void)sender;
+    [self closeSettings];
+}
+
+- (void)closeSettingsTapped:(UIButton *)sender {
+    (void)sender;
+    [self closeSettings];
+}
+
+- (void)closeSettingsFromKeyboard:(UIKeyCommand *)command {
+    (void)command;
+    [self closeSettings];
+}
+
+- (void)closeSettings {
+    UIControl *overlay = self.settingsOverlay;
+    if (!overlay) return;
+    self.settingsOverlay = nil;
+    self.playButton.accessibilityElementsHidden = NO;
+    self.settingsButton.accessibilityElementsHidden = NO;
+    [overlay removeFromSuperview];
+    [self resignFirstResponder];
+    UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, self.settingsButton);
 }
 
 - (void)stopPlayback {
