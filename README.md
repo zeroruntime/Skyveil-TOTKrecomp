@@ -17,6 +17,30 @@ The current iOS menu and settings are on the `codex/totk-main-menu` branch. Use 
 
 The menu and settings were tested on an iPhone 14 Pro Max. The iOS deployment target is iOS/iPadOS 26.0. All settings, including FPS and master volume, persist on the device between launches.
 
+## Add your own menu video (optional)
+
+The menu video is **not included in this repository**. Supply your own MP4; H.264 at 1080p is the tested format. The menu loops it silently.
+
+For reference, the animated TOTK wallpaper I used during testing can be found on the original creator’s ArtStation page:  
+https://favorisxp.artstation.com/projects/49yRQ2
+
+Download or use any background only in accordance with the creator’s terms and applicable rights.
+
+From the repository root, place your video at this exact path and filename:
+
+```sh
+mkdir -p game_essentials
+cp "/path/to/your/video.mp4" game_essentials/totk_menu_video.mp4
+```
+
+Then build the iOS IPA using the instructions below. `build_app.py` automatically includes this file for TOTK iOS builds; no source-code changes are needed. Rebuild and reinstall the app after adding or replacing the video.
+
+Without it, Play and Settings still work over a dark background. Keep the video local and out of commits.
+
+If you want a coding agent to help, give it this request:
+
+> Add my local menu video to Skyveil. Copy it to `game_essentials/totk_menu_video.mp4`, check that `build_app.py` passes it to the TOTK iOS packager, and rebuild the IPA. Preserve the existing menu and settings, and do not commit the video or other game files.
+
 ## Build on an Intel Mac
 
 ### Requirements
@@ -52,7 +76,7 @@ xcodebuild -downloadComponent MetalToolchain
 
 ### 3. Build the Intel shader translator
 
-A clean checkout of this branch does not include the Intel host translator under `games/totk/prebuilt/macos-x86_64`. The normal build checks for this host tool and its SHA-256 file, then stops if either is missing. Build it locally with the repository script. It requires the **.NET 10 SDK** and network access on its first run. The existing local Intel helper build notes record SDK 10.0.403; that is a record of the local build, not a version enforced by the project. [Download a .NET 10 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/10.0):
+The build needs `totk_xlate` and `totk_xlate.sha256` under `games/totk/prebuilt/macos-x86_64`. If your checkout already contains both files, skip this step; the builder verifies the binary’s SHA-256 automatically. Otherwise, build the translator locally with the repository script. It requires the **.NET 10 SDK** and network access on its first run. The existing local Intel helper build notes record SDK 10.0.403; that is a record of the local build, not a version enforced by the project. [Download a .NET 10 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/10.0):
 
 ```sh
 games/totk/tools/totk_xlate/publish_native.sh
