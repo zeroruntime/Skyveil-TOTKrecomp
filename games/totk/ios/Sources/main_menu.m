@@ -3,6 +3,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <math.h>
 #import <stdlib.h>
+#import "../../third_party/d2r_gfx/gfx/nvn/fps_overlay.h"
 #import "phone_settings.h"
 #import "runtime.h"
 
@@ -14,16 +15,30 @@
 @property(nonatomic, strong) UIButton *playButton;
 @property(nonatomic, strong) UIButton *settingsButton;
 @property(nonatomic, strong) UIControl *settingsOverlay;
+@property(nonatomic, strong) UIStackView *settingsPageContainer;
+@property(nonatomic, strong) UIScrollView *settingsScrollView;
+@property(nonatomic, strong) NSArray<UIStackView *> *settingsPages;
+@property(nonatomic, strong) NSArray<UIButton *> *settingsTabButtons;
+@property(nonatomic, strong) UILabel *masterVolumeValueLabel;
+@property(nonatomic, strong) UISlider *masterVolumeSlider;
+@property(nonatomic) NSUInteger selectedSettingsTab;
 @property(nonatomic) CGSize videoSize;
 @property(nonatomic) NSUInteger playbackGeneration;
 @property(nonatomic) BOOL leavingForGame;
 @property(nonatomic) BOOL observingLifecycle;
+- (BOOL)iosFpsOverlayEnabledPreference;
+- (NSInteger)iosFpsOverlayCornerPreference;
+- (void)applyFpsOverlayPreferences;
+- (NSInteger)iosMasterVolumePreference;
+- (void)applyMasterVolumePreference;
 @end
 
 @implementation TOTKMainMenuController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    [self applyFpsOverlayPreferences];
+    [self applyMasterVolumePreference];
 
     self.view.backgroundColor = [UIColor colorWithRed:0.025 green:0.035 blue:0.03 alpha:1.0];
     self.view.clipsToBounds = YES;
@@ -317,6 +332,31 @@
     title.textColor = gold;
     title.accessibilityTraits = UIAccessibilityTraitHeader;
 
+    UIButton *fpsOverlayRow = [self makeSettingsToggleRowWithTitle:@"Show FPS"
+                                                             detail:@"Show a compact, measured frame-rate badge during play."
+                                                          isEnabled:[self iosFpsOverlayEnabledPreference]
+                                                                tag:103
+                                                             action:@selector(fpsOverlayRowTapped:)];
+    UILabel *fpsCornerTitle = [self settingsLabel:@"FPS Overlay" font:[UIFont systemFontOfSize:20 weight:UIFontWeightSemibold] color:cream];
+    UISegmentedControl *fpsCorner = [[UISegmentedControl alloc] initWithItems:@[@"Top left", @"Top right", @"Bottom left", @"Bottom right"]];
+    fpsCorner.translatesAutoresizingMaskIntoConstraints = NO;
+    fpsCorner.selectedSegmentIndex = [self iosFpsOverlayCornerPreference];
+    fpsCorner.selectedSegmentTintColor = gold;
+    fpsCorner.accessibilityLabel = @"FPS Overlay";
+    fpsCorner.accessibilityHint = @"Choose which game picture corner holds the FPS badge.";
+    [fpsCorner setTitleTextAttributes:@{NSForegroundColorAttributeName: cream,
+                                       NSFontAttributeName: [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]}
+                              forState:UIControlStateNormal];
+    [fpsCorner setTitleTextAttributes:@{NSForegroundColorAttributeName: dark,
+                                       NSFontAttributeName: [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]}
+                              forState:UIControlStateSelected];
+    [fpsCorner addTarget:self action:@selector(fpsCornerChanged:) forControlEvents:UIControlEventValueChanged];
+    [fpsCorner.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    UIStackView *fpsCornerGroup = [[UIStackView alloc] initWithArrangedSubviews:@[fpsCornerTitle, fpsCorner]];
+    fpsCornerGroup.axis = UILayoutConstraintAxisVertical;
+    fpsCornerGroup.alignment = UIStackViewAlignmentFill;
+    fpsCornerGroup.spacing = 8;
+
     UILabel *fpsTitle = [self settingsLabel:@"Phone frame rate" font:[UIFont systemFontOfSize:20 weight:UIFontWeightSemibold] color:cream];
     UILabel *fpsDescription = [self settingsLabel:@"30 FPS holds at 30. Up to 60 FPS is a cap, not a guarantee; demanding scenes may run slower."
                                                font:[UIFont systemFontOfSize:18] color:[cream colorWithAlphaComponent:0.82]];
@@ -346,6 +386,36 @@
     frameRateGroup.alignment = UIStackViewAlignmentFill;
     frameRateGroup.spacing = 10;
 
+    UIView *spacer = [UIView new];
+    UILabel *volumeTitle = [self settingsLabel:@"Master Volume" font:[UIFont systemFontOfSize:20 weight:UIFontWeightSemibold] color:cream];
+    UILabel *volumeValue = [self settingsLabel:[NSString stringWithFormat:@"%ld%%", (long)[self iosMasterVolumePreference]]
+                                           font:[UIFont systemFontOfSize:18 weight:UIFontWeightMedium] color:cream];
+    volumeValue.textAlignment = NSTextAlignmentRight;
+    self.masterVolumeValueLabel = volumeValue;
+    UIStackView *volumeHeader = [[UIStackView alloc] initWithArrangedSubviews:@[volumeTitle, spacer, volumeValue]];
+    volumeHeader.axis = UILayoutConstraintAxisHorizontal;
+    volumeHeader.alignment = UIStackViewAlignmentCenter;
+    volumeHeader.spacing = 8;
+
+    UISlider *volumeSlider = [UISlider new];
+    volumeSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    volumeSlider.minimumValue = 0;
+    volumeSlider.maximumValue = 100;
+    volumeSlider.value = (float)[self iosMasterVolumePreference];
+    volumeSlider.minimumTrackTintColor = gold;
+    volumeSlider.maximumTrackTintColor = [cream colorWithAlphaComponent:0.28];
+    volumeSlider.thumbTintColor = gold;
+    volumeSlider.accessibilityLabel = @"Master Volume";
+    volumeSlider.accessibilityHint = @"Adjusts game volume from silent to full volume.";
+    volumeSlider.accessibilityValue = [NSString stringWithFormat:@"%ld percent", (long)[self iosMasterVolumePreference]];
+    [volumeSlider addTarget:self action:@selector(masterVolumeChanged:) forControlEvents:UIControlEventValueChanged];
+    self.masterVolumeSlider = volumeSlider;
+    [volumeSlider.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    UIStackView *volumeGroup = [[UIStackView alloc] initWithArrangedSubviews:@[volumeHeader, volumeSlider]];
+    volumeGroup.axis = UILayoutConstraintAxisVertical;
+    volumeGroup.alignment = UIStackViewAlignmentFill;
+    volumeGroup.spacing = 12;
+
     UIButton *gyroRow = [self makeSettingsToggleRowWithTitle:@"Phone gyro"
                                                     detail:@"Uses phone motion controls when no controller is connected."
                                                   isEnabled:totk_phone_setting_enabled(@"TOTK_PHONE_GYRO")
@@ -357,11 +427,57 @@
                                                         tag:102
                                                      action:@selector(hapticsRowTapped:)];
 
-    UIStackView *settingsRows = [[UIStackView alloc] initWithArrangedSubviews:@[frameRateGroup, gyroRow, hapticsRow]];
-    settingsRows.axis = UILayoutConstraintAxisVertical;
-    settingsRows.alignment = UIStackViewAlignmentFill;
-    settingsRows.spacing = 14;
-    settingsRows.translatesAutoresizingMaskIntoConstraints = NO;
+    UIStackView *displayPage = [[UIStackView alloc] initWithArrangedSubviews:@[fpsOverlayRow, fpsCornerGroup, frameRateGroup]];
+    UIStackView *audioPage = [[UIStackView alloc] initWithArrangedSubviews:@[volumeGroup]];
+    UIStackView *controlsPage = [[UIStackView alloc] initWithArrangedSubviews:@[gyroRow, hapticsRow]];
+    self.settingsPages = @[displayPage, audioPage, controlsPage];
+    for (UIStackView *page in self.settingsPages) {
+        page.axis = UILayoutConstraintAxisVertical;
+        page.alignment = UIStackViewAlignmentFill;
+        page.spacing = 14;
+        page.translatesAutoresizingMaskIntoConstraints = NO;
+    }
+
+    NSArray<NSString *> *tabTitles = @[@"Display", @"Audio", @"Controls"];
+    NSArray<NSString *> *tabHints = @[@"Show display and frame-rate settings.", @"Adjust master volume.", @"Show gyro and vibration controls."];
+    NSMutableArray<UIButton *> *tabButtons = [NSMutableArray arrayWithCapacity:tabTitles.count];
+    UIStackView *tabBar = [[UIStackView alloc] init];
+    tabBar.translatesAutoresizingMaskIntoConstraints = NO;
+    tabBar.axis = UILayoutConstraintAxisHorizontal;
+    tabBar.alignment = UIStackViewAlignmentFill;
+    tabBar.distribution = UIStackViewDistributionFillEqually;
+    tabBar.spacing = 10;
+    for (NSUInteger index = 0; index < tabTitles.count; index++) {
+        UIButton *tab = [UIButton buttonWithType:UIButtonTypeCustom];
+        tab.translatesAutoresizingMaskIntoConstraints = NO;
+        tab.tag = (NSInteger)index;
+        tab.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        [tab setTitle:tabTitles[index] forState:UIControlStateNormal];
+        tab.accessibilityLabel = tabTitles[index];
+        tab.accessibilityHint = tabHints[index];
+        tab.accessibilityTraits = UIAccessibilityTraitButton | (index == 0 ? UIAccessibilityTraitSelected : 0);
+        [tab setTitleColor:(index == 0 ? gold : cream) forState:UIControlStateNormal];
+        tab.accessibilityValue = index == 0 ? @"Selected" : nil;
+        [tab addTarget:self action:@selector(settingsTabTapped:) forControlEvents:UIControlEventTouchUpInside];
+        UIView *underline = [UIView new];
+        underline.translatesAutoresizingMaskIntoConstraints = NO;
+        underline.backgroundColor = gold;
+        underline.userInteractionEnabled = NO;
+        underline.tag = 1001;
+        underline.hidden = index != 0;
+        [tab addSubview:underline];
+        [NSLayoutConstraint activateConstraints:@[
+            [underline.leadingAnchor constraintEqualToAnchor:tab.leadingAnchor constant:10],
+            [underline.trailingAnchor constraintEqualToAnchor:tab.trailingAnchor constant:-10],
+            [underline.bottomAnchor constraintEqualToAnchor:tab.bottomAnchor],
+            [underline.heightAnchor constraintEqualToConstant:2]
+        ]];
+        [tab.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+        [tabBar addArrangedSubview:tab];
+        [tabButtons addObject:tab];
+    }
+    self.settingsTabButtons = tabButtons;
+    self.selectedSettingsTab = 0;
 
     UIScrollView *scrollView = [UIScrollView new];
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -370,13 +486,21 @@
     scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     scrollView.accessibilityElementsHidden = NO;
     scrollView.verticalScrollIndicatorInsets = UIEdgeInsetsMake(4, 0, 4, 0);
-    [scrollView addSubview:settingsRows];
+
+    UIStackView *pageContainer = [[UIStackView alloc] initWithArrangedSubviews:@[displayPage]];
+    pageContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    pageContainer.axis = UILayoutConstraintAxisVertical;
+    pageContainer.alignment = UIStackViewAlignmentFill;
+    pageContainer.spacing = 0;
+    self.settingsPageContainer = pageContainer;
+    self.settingsScrollView = scrollView;
+    [scrollView addSubview:pageContainer];
     [NSLayoutConstraint activateConstraints:@[
-        [settingsRows.leadingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.leadingAnchor],
-        [settingsRows.trailingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.trailingAnchor],
-        [settingsRows.topAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.topAnchor],
-        [settingsRows.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor],
-        [settingsRows.widthAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.widthAnchor]
+        [pageContainer.leadingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.leadingAnchor],
+        [pageContainer.trailingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.trailingAnchor],
+        [pageContainer.topAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.topAnchor],
+        [pageContainer.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor],
+        [pageContainer.widthAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.widthAnchor]
     ]];
     [scrollView setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
 
@@ -394,11 +518,11 @@
     [close addTarget:self action:@selector(closeSettingsTapped:) forControlEvents:UIControlEventTouchUpInside];
     [close.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
 
-    UIStackView *panelContent = [[UIStackView alloc] initWithArrangedSubviews:@[title, scrollView, close]];
+    UIStackView *panelContent = [[UIStackView alloc] initWithArrangedSubviews:@[title, tabBar, scrollView, close]];
     panelContent.translatesAutoresizingMaskIntoConstraints = NO;
     panelContent.axis = UILayoutConstraintAxisVertical;
     panelContent.alignment = UIStackViewAlignmentFill;
-    panelContent.spacing = 12;
+    panelContent.spacing = 10;
     [card addSubview:panelContent];
     [NSLayoutConstraint activateConstraints:@[
         [panelContent.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:22],
@@ -419,6 +543,50 @@
     label.textColor = color;
     label.isAccessibilityElement = YES;
     return label;
+}
+
+- (void)settingsTabTapped:(UIButton *)sender {
+    NSUInteger selected = (NSUInteger)sender.tag;
+    NSUInteger previous = self.selectedSettingsTab;
+    if (selected >= self.settingsPages.count || selected == previous) return;
+    self.settingsScrollView.contentOffset = CGPointZero;
+    UIStackView *currentPage = self.settingsPages[previous];
+    [self.settingsPageContainer removeArrangedSubview:currentPage];
+    [currentPage removeFromSuperview];
+    [self.settingsPageContainer addArrangedSubview:self.settingsPages[selected]];
+    self.selectedSettingsTab = selected;
+    for (NSUInteger index = 0; index < self.settingsPages.count; index++) {
+        BOOL isSelected = index == selected;
+        UIButton *tab = self.settingsTabButtons[index];
+        tab.accessibilityTraits = UIAccessibilityTraitButton | (isSelected ? UIAccessibilityTraitSelected : 0);
+        tab.accessibilityValue = isSelected ? @"Selected" : nil;
+        [tab setTitleColor:(isSelected
+            ? [UIColor colorWithRed:0.89 green:0.75 blue:0.48 alpha:1.0]
+            : [UIColor colorWithRed:0.94 green:0.92 blue:0.84 alpha:1.0])
+                  forState:UIControlStateNormal];
+        [tab viewWithTag:1001].hidden = !isSelected;
+    }
+    UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, sender);
+}
+
+- (NSInteger)iosMasterVolumePreference {
+    id saved = [NSUserDefaults.standardUserDefaults objectForKey:@"TOTK_IOS_MASTER_VOLUME"];
+    NSInteger volume = saved ? [saved integerValue] : 100;
+    return MAX(0, MIN(100, volume));
+}
+
+- (void)applyMasterVolumePreference {
+    runtime_audio_master_volume_set((int)[self iosMasterVolumePreference]);
+}
+
+- (void)masterVolumeChanged:(UISlider *)slider {
+    NSInteger volume = MAX(0, MIN(100, (NSInteger)lroundf(slider.value)));
+    [slider setValue:(float)volume animated:NO];
+    NSString *value = [NSString stringWithFormat:@"%ld%%", (long)volume];
+    self.masterVolumeValueLabel.text = value;
+    slider.accessibilityValue = [NSString stringWithFormat:@"%ld percent", (long)volume];
+    [NSUserDefaults.standardUserDefaults setInteger:volume forKey:@"TOTK_IOS_MASTER_VOLUME"];
+    runtime_audio_master_volume_set((int)volume);
 }
 
 - (UIButton *)makeSettingsToggleRowWithTitle:(NSString *)title
@@ -470,6 +638,41 @@
         [row.heightAnchor constraintGreaterThanOrEqualToConstant:84]
     ]];
     return row;
+}
+
+- (BOOL)iosFpsOverlayEnabledPreference {
+    id saved = [NSUserDefaults.standardUserDefaults objectForKey:@"TOTK_IOS_SHOW_FPS"];
+    return saved ? [saved boolValue] : YES;
+}
+
+- (NSInteger)iosFpsOverlayCornerPreference {
+    id saved = [NSUserDefaults.standardUserDefaults objectForKey:@"TOTK_IOS_FPS_CORNER"];
+    NSInteger corner = saved ? [saved integerValue] : FPS_OVERLAY_CORNER_TOP_RIGHT;
+    return corner >= FPS_OVERLAY_CORNER_TOP_LEFT && corner <= FPS_OVERLAY_CORNER_BOTTOM_RIGHT
+        ? corner : FPS_OVERLAY_CORNER_TOP_RIGHT;
+}
+
+- (void)applyFpsOverlayPreferences {
+    fps_overlay_set_ios_preferences([self iosFpsOverlayEnabledPreference], (int)[self iosFpsOverlayCornerPreference]);
+}
+
+- (void)fpsOverlayRowTapped:(UIButton *)row {
+    UISwitch *toggle = (UISwitch *)[row viewWithTag:103];
+    if (!toggle) return;
+    BOOL enabled = !toggle.isOn;
+    [toggle setOn:enabled animated:YES];
+    [NSUserDefaults.standardUserDefaults setBool:enabled forKey:@"TOTK_IOS_SHOW_FPS"];
+    row.accessibilityValue = enabled ? @"On" : @"Off";
+    row.accessibilityHint = [NSString stringWithFormat:@"Show a compact, measured frame-rate badge during play. Double-tap to turn %@.", enabled ? @"off" : @"on"];
+    row.accessibilityTraits = UIAccessibilityTraitButton | (enabled ? UIAccessibilityTraitSelected : 0);
+    [self applyFpsOverlayPreferences];
+}
+
+- (void)fpsCornerChanged:(UISegmentedControl *)control {
+    NSInteger corner = control.selectedSegmentIndex;
+    if (corner < FPS_OVERLAY_CORNER_TOP_LEFT || corner > FPS_OVERLAY_CORNER_BOTTOM_RIGHT) return;
+    [NSUserDefaults.standardUserDefaults setInteger:corner forKey:@"TOTK_IOS_FPS_CORNER"];
+    [self applyFpsOverlayPreferences];
 }
 
 - (void)frameRateChanged:(UISegmentedControl *)control {

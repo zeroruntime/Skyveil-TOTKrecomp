@@ -20,7 +20,20 @@ static void splitter(Mixer *m, int id, int destination_id, int mix, float volume
     m->dest[destination_id].vol[0] = volume;
 }
 
-static int run_case(int scenario) {
+static int settle_master_gain(AudioRenderer *r, float target) {
+    Mixer *m = r->mixer;
+    unsigned limit = (m->master_ramp_frames + (unsigned)m->frame - 1) / (unsigned)m->frame + 2;
+    for (unsigned block = 0; block < limit; block++) {
+        audio_mixer_render(r, (double)m->frame / r->param.sample_rate);
+        if (m->master_ramp_elapsed >= m->master_ramp_frames && fabsf(m->master_gain - target) <= 1e-6f) return 0;
+    }
+    fprintf(stderr, "master ramp did not settle at %.3f (got %.6f)\n", target, m->master_gain);
+    return 1;
+}
+
+static int run_case(int scenario, int initial_master, int target_master, float guest_volume) {
+    runtime_audio_master_volume_set(initial_master);
+    atomic_store(&device_volume, guest_volume);
     int16_t pcm[16];
     for (int k = 0; k < 16; ++k) pcm[k] = (int16_t)((k - 8) * 512);
     AudioRenderer r = {.param = {.sample_rate=48000, .sample_count=16, .mix_buffer_count=8,
@@ -58,18 +71,55 @@ static int run_case(int scenario) {
         m->dest[2].used = 1; m->dest[2].dest = 1; m->dest[2].vol[0] = .5f;
         gain = 1.5f;
     }
+    runtime_audio_master_volume_set(target_master);
     audio_mixer_render(&r, 16.0/48000);
     float output[32];
     if (audio_mixer_read(&r, output, 16) != 16) runtime_fail("no output frames");
     int failed = 0;
     for (int k = 0; k < 16; ++k) for (int c = 0; c < 2; ++c) {
-        float want = pcm[k]/32768.f * gain * (c?.5f:1.f);
+        float master = (float)initial_master / 100.f;
+        if (initial_master != target_master) {
+            float progress = fminf((float)(k + 1) / (float)m->master_ramp_frames, 1.f);
+            master += ((float)target_master - (float)initial_master) / 100.f * progress;
+        }
+        float want = pcm[k]/32768.f * gain * guest_volume * master * (c?.5f:1.f);
         if (!isfinite(output[k*2+c]) || fabsf(output[k*2+c]-want)>1e-6f) {
             if (!failed) fprintf(stderr, "route %d frame %d channel %d: got %.7f expected %.7f\n", scenario,k,c,output[k*2+c],want);
             failed = 1;
         }
     }
+    if (initial_master != target_master) {
+        float partial_gain = m->master_gain;
+        runtime_audio_master_volume_set(initial_master);
+        audio_mixer_render(&r, 16.0/48000);
+        float reversed = partial_gain + ((float)initial_master / 100.f - partial_gain) *
+            fminf((float)r.param.sample_count / (float)m->master_ramp_frames, 1.f);
+        if (fabsf(m->master_gain - reversed) > 1e-6f) {
+            fprintf(stderr, "route %d mid-ramp reversal: got %.7f expected %.7f\n", scenario, m->master_gain, reversed);
+            failed = 1;
+        }
+        failed += settle_master_gain(&r, (float)initial_master / 100.f);
+
+        runtime_audio_master_volume_set(target_master);
+        failed += settle_master_gain(&r, (float)target_master / 100.f);
+        if (target_master == 0) {
+            float silent[32];
+            audio_mixer_render(&r, 16.0/48000);
+            if (audio_mixer_read(&r, silent, 16) != 16) runtime_fail("no settled-mute frames");
+            for (int i = 0; i < 32; i++) if (!isfinite(silent[i]) || silent[i] != 0.0f) {
+                fprintf(stderr, "route %d settled mute sample %d was %.7f\n", scenario, i, silent[i]);
+                failed = 1;
+                break;
+            }
+        }
+    }
+    if (fabsf(atomic_load(&device_volume) - guest_volume) > 1e-6f) {
+        fprintf(stderr, "route %d changed the guest device volume\n", scenario);
+        failed = 1;
+    }
     audio_mixer_close(&r);
+    atomic_store(&device_volume, 1.0f);
+    runtime_audio_master_volume_set(100);
     free(r.voices); free(r.channels); free(r.effects); free(r.mixes); free(r.sinks);
     return failed;
 }
@@ -114,8 +164,15 @@ static int eos_samples(void) {
 int main(void) {
     setenv("TOTK_AUDIO_OFF", "1", 1); unsetenv("TOTK_AUDIO_CAPTURE");
     int failed = eos_samples();
-    for (int i = 0; i < 4; ++i) failed += run_case(i);
+    for (int i = 0; i < 4; ++i) failed += run_case(i, 100, 100, 1.0f);
+    failed += run_case(0, 0, 0, 0.5f);       /* saved mute is active before the first rendered sample */
+    failed += run_case(0, 100, 0, 0.25f);    /* gain changes ramp over 20 ms without altering guest volume */
+    runtime_audio_master_volume_set(-1);
+    if (atomic_load(&master_volume_target) != 0.0f) { fprintf(stderr, "master volume lower bound was not clamped\n"); failed++; }
+    runtime_audio_master_volume_set(101);
+    if (atomic_load(&master_volume_target) != 1.0f) { fprintf(stderr, "master volume upper bound was not clamped\n"); failed++; }
     if (failed) return 1;
     puts("4 audio routing graphs / 64 stereo frames (128 channel samples) passed");
+    puts("saved mute, guest volume separation, clamp, 20 ms ramp completion/reversal, and settled mute passed");
     return 0;
 }

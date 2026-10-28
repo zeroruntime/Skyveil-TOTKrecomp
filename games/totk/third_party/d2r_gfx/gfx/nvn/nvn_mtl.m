@@ -104,7 +104,7 @@ static int g_present_probe;
 // present on a slot has completed before the slot is reused); slot 3 serves whole-window grabs. g_fps_key: what is drawn.
 static id<MTLTexture> g_fps_tex[4];
 static id<MTLBuffer> g_fps_uv[3];
-static struct { fps_overlay_info info; int scale; } g_fps_key[4] = {{{.fps = -1000}, 0}, {{.fps = -1000}, 0}, {{.fps = -1000}, 0}, {{.fps = -1000}, 0}};
+static struct { fps_overlay_info info; int scale, clean; } g_fps_key[4] = {{{.fps = -1000}, 0, 0}, {{.fps = -1000}, 0, 0}, {{.fps = -1000}, 0, 0}, {{.fps = -1000}, 0, 0}};
 static _Atomic int g_pic_big;   /* the game picture (its crop) is bigger than 1920x1080: true 2K (" 2K" in the FPS box) */
 static int g_fps_box[4][2];
 // TOTK load line (bottom-right, load_overlay_prepare; totk_sysload.c): same slots as the FPS box, a wider texture.
@@ -13505,7 +13505,8 @@ void mtl_exec(const uint8_t *p) {
 
 // ---------- 出图：交换链贴图画到 CAMetalLayer；可选截图 ----------
 // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
-static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
+static id<MTLRenderPipelineState> g_blit_pso, g_clean_blit_pso;
+static MTLPixelFormat g_blit_fmt, g_clean_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // 实际出图次数（发热归因 DM_HEAT 算出图帧率） | Actual present count (heat attribution DM_HEAT computes the present frame rate)
@@ -13989,6 +13990,31 @@ static void present_pipeline(MTLPixelFormat format) {
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
     }
+    if (fps_overlay_ios_clean_enabled() && (!g_clean_blit_pso || g_clean_blit_fmt != format)) {
+        static const char *src_msl =
+            "#include <metal_stdlib>\nusing namespace metal;\n"
+            "struct V { float4 p [[position]]; float2 uv; };\n"
+            "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
+            "struct Crop { float4 rect; float4 edge; };\n"
+            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n";
+        NSError *e = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
+        if (!lib) MDIE("FPS badge 着色器编译失败 %s", e.localizedDescription.UTF8String);
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+        pd.colorAttachments[0].pixelFormat = format;
+        MTLRenderPipelineColorAttachmentDescriptor *color = pd.colorAttachments[0];
+        color.blendingEnabled = YES;
+        color.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+        color.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        color.rgbBlendOperation = MTLBlendOperationAdd;
+        color.sourceAlphaBlendFactor = MTLBlendFactorOne;
+        color.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        color.alphaBlendOperation = MTLBlendOperationAdd;
+        g_clean_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        if (!g_clean_blit_pso) MDIE("FPS badge 混合管线失败 %s", e.localizedDescription.UTF8String);
+        g_clean_blit_fmt = format;
+    }
 }
 // 出图仅采NVN声明的有效源矩形；与原始交换链读回截图分开。边缘钳到有效区纹素中心，双线性不读外侧黑纹素。
 // Present samples only the valid source rectangle declared by NVN; kept separate from the raw swapchain readback screenshot. Edges are clamped to the texel centers of the valid area, so bilinear does not read the black texels outside.
@@ -14015,6 +14041,10 @@ static double hud_inset_right(MTLViewport vp) {
     int w = atomic_load(&g_hud_safe_w), s = atomic_load(&g_hud_safe_side); double gap = w - (vp.originX + vp.width);
     return w > 0 && s > gap ? s - gap : 0;
 }
+static double hud_inset_left(MTLViewport vp) {
+    int s = atomic_load(&g_hud_safe_side);
+    return s > vp.originX ? s - vp.originX : 0;
+}
 static double hud_inset_bottom(MTLViewport vp) {
     int h = atomic_load(&g_hud_safe_h), b = atomic_load(&g_hud_safe_bottom); double gap = h - (vp.originY + vp.height);
     return h > 0 && b > gap ? b - gap : 0;
@@ -14022,7 +14052,9 @@ static double hud_inset_bottom(MTLViewport vp) {
 // TOTK: FPS, output resolution and (internal resolution) in the top-right corner of the game picture (pixels come from fps_overlay.c). Rasterises into
 // the slot's texture only when what is shown changes, and returns the viewport and source rectangle to draw.
 static int fps_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float uv[8]) {
-    if (!fps_overlay_hints_enabled() || !fps_overlay_enabled() || slot < 0 || slot > 3 || !g_fps_tex[slot]) return 0;
+    int clean = fps_overlay_ios_clean_enabled();
+    if ((clean ? !fps_overlay_ios_show_fps() : (!fps_overlay_hints_enabled() || !fps_overlay_enabled())) ||
+        slot < 0 || slot > 3 || !g_fps_tex[slot]) return 0;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     static uint8_t px[FPS_OVERLAY_TEX_W * FPS_OVERLAY_TEX_H * 4];
     int scale = fps_overlay_scale(vp.height);
@@ -14033,17 +14065,25 @@ static int fps_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float
     if (up_at && cur - up_at < 30 && up) { ow = (int)(uint32_t)up; oh = (int)(up >> 32); }   // MetalFX 2K: what it upscaled the canvas to (the user read 1080p)
     fps_overlay_info info = {fps_overlay_value(), ow ? ow : (int)lround(vp.width), oh ? oh : (int)lround(vp.height), mfx_at && cur - mfx_at < 30, gen > 0 ? gen : 0, atomic_load(&g_pic_big),
                              (int)atomic_load(&g_scene_w), (int)atomic_load(&g_scene_h)};
-    if (hud_compact()) { char text[96]; fps_overlay_text(&info, text, sizeof text); hud_publish(HUD_FPS, text, 0); return 0; }   // shown in the window's corner panel
+    if (hud_compact() && !clean) { char text[96]; fps_overlay_text(&info, text, sizeof text); hud_publish(HUD_FPS, text, 0); return 0; }   // the iOS clean preference always draws in-picture
     pthread_mutex_lock(&mu);
-    if (g_fps_key[slot].scale != scale || memcmp(&g_fps_key[slot].info, &info, sizeof info)) {
-        fps_overlay_raster(&info, scale, px, &g_fps_box[slot][0], &g_fps_box[slot][1]);
+    if (g_fps_key[slot].scale != scale || g_fps_key[slot].clean != clean || memcmp(&g_fps_key[slot].info, &info, sizeof info)) {
+        if (clean) fps_overlay_raster_clean_fps(info.fps, scale, px, &g_fps_box[slot][0], &g_fps_box[slot][1]);
+        else fps_overlay_raster(&info, scale, px, &g_fps_box[slot][0], &g_fps_box[slot][1]);
         [g_fps_tex[slot] replaceRegion:MTLRegionMake2D(0, 0, FPS_OVERLAY_TEX_W, FPS_OVERLAY_TEX_H) mipmapLevel:0 withBytes:px bytesPerRow:FPS_OVERLAY_TEX_W * 4];
-        g_fps_key[slot].info = info; g_fps_key[slot].scale = scale;
+        g_fps_key[slot].info = info; g_fps_key[slot].scale = scale; g_fps_key[slot].clean = clean;
     }
     float bw = g_fps_box[slot][0], bh = g_fps_box[slot][1], W = FPS_OVERLAY_TEX_W, H = FPS_OVERLAY_TEX_H;
     pthread_mutex_unlock(&mu);
     double m = 3.0 * scale;
-    *ovp = (MTLViewport){vp.originX + vp.width - m - bw - hud_inset_right(vp), vp.originY + m, bw, bh, 0, 1};   // top-right corner
+    if (clean) {
+        double x, y;
+        if (!fps_overlay_position(fps_overlay_ios_corner(), vp.originX, vp.originY, vp.width, vp.height, bw, bh, m,
+                                  hud_inset_left(vp), hud_inset_right(vp), 0, hud_inset_bottom(vp), &x, &y)) return 0;
+        *ovp = (MTLViewport){x, y, bw, bh, 0, 1};
+    } else {
+        *ovp = (MTLViewport){vp.originX + vp.width - m - bw - hud_inset_right(vp), vp.originY + m, bw, bh, 0, 1};   // legacy top-right corner
+    }
     const float u[8] = {0, 0, bw / W, bh / H, 0.5f / W, 0.5f / H, (bw - 0.5f) / W, (bh - 0.5f) / H};
     memcpy(uv, u, sizeof u);
     return 1;
@@ -14219,9 +14259,11 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     MTLViewport ovp; float fuv[8];
     if (fps_overlay && fps_overlay_prepare(3, vp, &ovp, fuv)) {
-        [en setViewport:ovp]; [en setFragmentTexture:g_fps_tex[3] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
+        [en setViewport:ovp]; [en setRenderPipelineState:fps_overlay_ios_clean_enabled() ? g_clean_blit_pso : g_blit_pso];
+        [en setFragmentTexture:g_fps_tex[3] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     }
+    if (fps_overlay_ios_clean_enabled()) [en setRenderPipelineState:g_blit_pso];
     if (fps_overlay && shader_overlay_prepare(3, vp, &ovp, fuv)) {
         [en setViewport:ovp]; [en setFragmentTexture:g_shd_tex[3] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -14273,9 +14315,10 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
         memcpy(g_fps_uv[uv_i].contents, fuv, sizeof fuv);
         [args setTexture:g_fps_tex[uv_i].gpuResourceID atIndex:0];
         [args setAddress:g_fps_uv[uv_i].gpuAddress atIndex:0];
-        [en setViewport:ovp];
+        [en setViewport:ovp]; [en setRenderPipelineState:fps_overlay_ios_clean_enabled() ? g_clean_blit_pso : g_blit_pso];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     }
+    if (fps_overlay_ios_clean_enabled()) [en setRenderPipelineState:g_blit_pso];
     if (shader_overlay_prepare(uv_i, vp, &ovp, fuv)) {   // bottom-left: automatic shader collection
         memcpy(g_shd_uv[uv_i].contents, fuv, sizeof fuv);
         [args setTexture:g_shd_tex[uv_i].gpuResourceID atIndex:0];

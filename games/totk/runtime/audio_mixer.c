@@ -40,6 +40,8 @@ typedef struct Mixer {
     int *offset;                                   /* first mix buffer of each mix id */
     SplitInfo *split; int nsplit; SplitDest *dest; int ndest;
     AudioComponentInstance unit; int unit_ok, rate;
+    float master_gain, master_target, master_ramp_start;
+    unsigned master_ramp_elapsed, master_ramp_frames;
     float ring[RING_FRAMES * 2]; _Atomic uint64_t wr, rd, underruns, overruns;
     _Atomic int playing; int ready; _Atomic uint64_t missing_frames, trims, trimmed_frames;
     _Atomic uint64_t flush_until; _Atomic unsigned stop_epoch; unsigned callback_epoch;
@@ -58,6 +60,12 @@ typedef struct Mixer {
 } Mixer;
 
 static _Atomic float device_volume = 1.0f;
+static _Atomic float master_volume_target = 1.0f;
+void runtime_audio_master_volume_set(int percent) {
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    atomic_store_explicit(&master_volume_target, (float)percent / 100.0f, memory_order_release);
+}
 static unsigned audio_revision(const AudioRenderer *r) { unsigned byte=r->revision>>24;return byte>='0'?byte-'0':0; }
 static void report_once(Mixer *m, unsigned bit, const char *msg, int value) {
     if (m->reported & (1u << bit)) return;
@@ -192,6 +200,11 @@ void audio_mixer_open(AudioRenderer *r) {
     Mixer *m = calloc(1, sizeof *m);
     if (!m) runtime_fail("audio mixer allocation");
     m->frame = r->param.sample_count; m->nbuf = r->param.mix_buffer_count;
+    m->master_gain = atomic_load_explicit(&master_volume_target, memory_order_acquire);
+    m->master_target = m->master_gain;
+    m->master_ramp_start = m->master_gain;
+    m->master_ramp_frames = r->param.sample_rate > 0 ? (unsigned)(r->param.sample_rate / 50) : 1; /* 20 ms */
+    if (!m->master_ramp_frames) m->master_ramp_frames = 1;
     if (m->frame <= 0 || m->frame > MAX_FRAME || m->nbuf <= 0 || m->nbuf > 512) runtime_fail("audio mixer frame / buffer count");
     m->buf = calloc((size_t)m->nbuf * (size_t)m->frame, sizeof(float));
     m->offset = calloc((size_t)r->param.submix_count + 1, sizeof(int));
@@ -803,10 +816,23 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
     float *lr=m->output_scratch;
     memset(lr, 0, sizeof(float) * 2 * (size_t)frames);
     if (sink && sink->input_count >= 1 && sink->input_count <= 6) {
-        const float gain = atomic_load(&device_volume) * (r->mixes[0].in_use ? r->mixes[0].volume : 1.0f);
+        const float guest_gain = atomic_load(&device_volume) * (r->mixes[0].in_use ? r->mixes[0].volume : 1.0f);
+        const float requested_master_gain = atomic_load_explicit(&master_volume_target, memory_order_acquire);
+        if (requested_master_gain != m->master_target) {
+            m->master_ramp_start = m->master_gain;
+            m->master_target = requested_master_gain;
+            m->master_ramp_elapsed = 0;
+        }
         const float *ch[6] = {0};
         for (uint32_t c = 0; c < sink->input_count; c++) if (sink->inputs[c] >= 0 && sink->inputs[c] < m->nbuf) ch[c] = mixbuf(m, sink->inputs[c]);
         for (int k = 0; k < frames; k++) {
+            float master_gain = m->master_target;
+            if (m->master_ramp_elapsed < m->master_ramp_frames) {
+                m->master_ramp_elapsed++;
+                float progress = (float)m->master_ramp_elapsed / (float)m->master_ramp_frames;
+                master_gain = m->master_ramp_start + (m->master_target - m->master_ramp_start) * progress;
+                m->master_gain = master_gain;
+            }
             float l, rr;
             if (sink->input_count >= 6) {   /* FL FR C LFE RL RR -> stereo */
                 float ff = sink->downmix_enabled ? sink->downmix[0] : 1.0f, cf = sink->downmix_enabled ? sink->downmix[1] : 0.7071f, sf = sink->downmix_enabled ? sink->downmix[2] : 0.7071f;
@@ -815,7 +841,7 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
                 rr = ff * (ch[1] ? ch[1][k] : 0) + cf * C + sf * (ch[5] ? ch[5][k] : 0);
             } else if (sink->input_count >= 2) { l = ch[0] ? ch[0][k] : 0; rr = ch[1] ? ch[1][k] : 0; }
             else l = rr = ch[0] ? ch[0][k] : 0;
-            l *= gain; rr *= gain;
+            l *= guest_gain * master_gain; rr *= guest_gain * master_gain;
             lr[2 * k] = l > 1 ? 1 : l < -1 ? -1 : l; lr[2 * k + 1] = rr > 1 ? 1 : rr < -1 ? -1 : rr;
         }
     } else if (!sink && !circular) report_once(m, 5, "no device sink in use", r->param.sink_count);

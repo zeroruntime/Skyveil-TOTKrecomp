@@ -20,6 +20,21 @@ int fps_overlay_hud_mode(void);
 int fps_overlay_hints_enabled(void);   /* the FPS readout shows (all or minimal) */
 int fps_overlay_full_hud(void);        /* everything shows (all) */
 void fps_overlay_set_hud_mode(int mode);   /* HUD_MODE_*; other values are ignored */
+/* The iOS main menu opts into a compact, measured-FPS badge. Until called, shared HUD defaults and rendering are unchanged. */
+enum { FPS_OVERLAY_CORNER_TOP_LEFT = 0, FPS_OVERLAY_CORNER_TOP_RIGHT = 1,
+       FPS_OVERLAY_CORNER_BOTTOM_LEFT = 2, FPS_OVERLAY_CORNER_BOTTOM_RIGHT = 3 };
+void fps_overlay_set_ios_preferences(int show_fps, int corner);
+int fps_overlay_ios_clean_enabled(void);
+int fps_overlay_ios_show_fps(void);
+int fps_overlay_ios_corner(void);
+/* Compact badge text uses the measured value (`-- FPS` before the first measurement), in a neutral semitransparent box. */
+void fps_overlay_clean_text(int fps, char *out, size_t n);
+void fps_overlay_raster_clean_fps(int fps, int scale, uint8_t *out, int *box_w, int *box_h);
+/* Place a box in one of the four corners, honoring safe-area insets and clamping to the game viewport. Returns 0 if it cannot fit. */
+int fps_overlay_position(int corner, double origin_x, double origin_y, double width, double height,
+                         double box_w, double box_h, double margin,
+                         double inset_left, double inset_right, double inset_top, double inset_bottom,
+                         double *x, double *y);
 /* Pixel scale (1..FPS_OVERLAY_MAX_SCALE) for a game picture view_h pixels tall: one text line is about 3% of its height. */
 int fps_overlay_scale(double view_h);
 /* The line in a 5x7 pixel font on a dark box, as BGRA8 pixels in out (FPS_OVERLAY_TEX_W x FPS_OVERLAY_TEX_H,

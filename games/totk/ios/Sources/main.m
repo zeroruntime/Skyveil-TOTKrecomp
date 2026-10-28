@@ -16,6 +16,14 @@
 #import "main_menu.h"
 #endif
 
+static AVAudioSessionCategoryOptions game_audio_session_options(void) {
+#if !TARGET_OS_VISION && !defined(GAME_BOTW)
+    return AVAudioSessionCategoryOptionMixWithOthers;
+#else
+    return 0;
+#endif
+}
+
 int totk_host_main(int argc, char **argv);
 void runtime_ios_attach_layer(CAMetalLayer *layer, UIView *host);
 void runtime_ios_sync_drawable(UIView *host);
@@ -137,7 +145,7 @@ void runtime_settings_toggle(void) {}
        didFinishLaunching blocked the main thread before the log file was opened. Interruptions: audio_observe. */
     AVAudioSession *audio = AVAudioSession.sharedInstance;
     NSError *catErr = nil, *actErr = nil;
-    [audio setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault options:0 error:&catErr];
+    [audio setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault options:game_audio_session_options() error:&catErr];
     BOOL activated = [audio setActive:YES error:&actErr];
     fprintf(stderr, "[totk-audio] audio session category=%s active=%d route=%s err=%s%s\n",
             audio.category.UTF8String ?: "?", (int)activated, audio.currentRoute.outputs.firstObject.portType.UTF8String ?: "?",
@@ -190,8 +198,11 @@ void runtime_settings_toggle(void) {}
    whose "ended" never came. Becoming active also turns the idle timer off again. */
 static BOOL g_audio_interrupted;
 static void audio_resume(int recreate, const char *why) {
-    NSError *err = nil;
-    if (![AVAudioSession.sharedInstance setActive:YES error:&err]) fprintf(stderr,"[totk-audio] audio session not active again (%s): %s\n",why,err.localizedDescription.UTF8String);
+    AVAudioSession *audio = AVAudioSession.sharedInstance;
+    NSError *categoryError = nil, *err = nil;
+    [audio setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault options:game_audio_session_options() error:&categoryError];
+    if (categoryError) fprintf(stderr,"[totk-audio] audio session category restore failed (%s): %s\n",why,categoryError.localizedDescription.UTF8String);
+    if (![audio setActive:YES error:&err]) fprintf(stderr,"[totk-audio] audio session not active again (%s): %s\n",why,err.localizedDescription.UTF8String);
     g_audio_interrupted = NO; runtime_audio_output_restart(recreate);
 }
 static void audio_observe(void) {
@@ -221,6 +232,16 @@ static void audio_observe(void) {
     (void)options;
     // Controller input does not reset the idle timer; auto-lock would suspend the game mid-play or mid shader import.
     application.idleTimerDisabled = YES;
+#if !TARGET_OS_VISION && !defined(GAME_BOTW)
+    /* Set the mixable playback category before the muted menu clip starts. Do not activate here: launch-time
+       activation blocked the main thread before its log setup on affected iOS versions. */
+    NSError *menuCategoryError = nil;
+    [AVAudioSession.sharedInstance setCategory:AVAudioSessionCategoryPlayback
+                                         mode:AVAudioSessionModeDefault
+                                      options:AVAudioSessionCategoryOptionMixWithOthers
+                                        error:&menuCategoryError];
+    if (menuCategoryError) fprintf(stderr, "[totk-audio] menu audio category failed: %s\n", menuCategoryError.localizedDescription.UTF8String);
+#endif
     audio_observe();
     /* The Mac launcher passes the preferred language as TOTK_LOCALE (PR #97); "zh-Hans-CN" maps to zh-Hans in services.c. */
     NSString *preferred = NSLocale.preferredLanguages.firstObject;

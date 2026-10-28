@@ -74,6 +74,46 @@ static void colours(int w, int h, int *green, int *yellow) {
 int main(void) {
     int w, h, green, yellow;
     setenv("TOTK_UI_LANG", "zh", 1);   /* the Chinese labels below; the English ones are checked after them */
+    CHECK(!fps_overlay_ios_clean_enabled() && fps_overlay_ios_show_fps() && fps_overlay_ios_corner() == FPS_OVERLAY_CORNER_TOP_RIGHT &&
+          fps_overlay_hud_mode() == HUD_MODE_ALL, "shared HUD defaults changed before the iOS menu opted in");
+    fps_overlay_set_ios_preferences(1, FPS_OVERLAY_CORNER_TOP_RIGHT);
+    CHECK(fps_overlay_ios_clean_enabled() && fps_overlay_ios_show_fps() && fps_overlay_ios_corner() == FPS_OVERLAY_CORNER_TOP_RIGHT &&
+          fps_overlay_hints_enabled() && !fps_overlay_full_hud() && fps_overlay_hud_mode() == HUD_MODE_MINIMAL,
+          "the iOS FPS preference did not select the clean, minimal HUD");
+    fps_overlay_set_ios_preferences(0, FPS_OVERLAY_CORNER_BOTTOM_LEFT);
+    CHECK(!fps_overlay_ios_show_fps() && fps_overlay_ios_corner() == FPS_OVERLAY_CORNER_BOTTOM_LEFT &&
+          !fps_overlay_hints_enabled() && !fps_overlay_full_hud() && fps_overlay_hud_mode() == HUD_MODE_OFF,
+          "turning the iOS FPS badge off did not select HUD_MODE_OFF");
+    fps_overlay_set_ios_preferences(1, 99);
+    CHECK(fps_overlay_ios_show_fps() && fps_overlay_ios_corner() == FPS_OVERLAY_CORNER_TOP_RIGHT && fps_overlay_hud_mode() == HUD_MODE_MINIMAL,
+          "invalid iOS corner did not fall back to top right");
+    char clean_text[24];
+    fps_overlay_clean_text(57, clean_text, sizeof clean_text);
+    CHECK(!strcmp(clean_text, "57 FPS"), "clean FPS text is \"%s\"", clean_text);
+    fps_overlay_clean_text(-1, clean_text, sizeof clean_text);
+    CHECK(!strcmp(clean_text, "-- FPS"), "unknown clean FPS text is \"%s\"", clean_text);
+    fps_overlay_clean_text(5000, clean_text, sizeof clean_text);
+    CHECK(!strcmp(clean_text, "999 FPS"), "clean FPS text did not clamp: \"%s\"", clean_text);
+    fps_overlay_raster_clean_fps(57, 1, px, &w, &h);
+    CHECK(w == 39 && h == 11 && !memcmp(at(0, 0), (const uint8_t[4]){12, 14, 16, 176}, 4) &&
+          !memcmp(at(2, 2), (const uint8_t[4]){226, 235, 242, 255}, 4) && outside_dirty(w, h) == 0,
+          "clean badge size, neutral text, translucent background or bounds are wrong (%dx%d)", w, h);
+
+    const double corners[4][2] = {{28, 30}, {246, 30}, {28, 182}, {246, 182}};
+    for (int corner = FPS_OVERLAY_CORNER_TOP_LEFT; corner <= FPS_OVERLAY_CORNER_BOTTOM_RIGHT; corner++) {
+        double x = -1, y = -1;
+        int placed = fps_overlay_position(corner, 10, 20, 300, 200, 40, 22, 6, 12, 18, 4, 10, &x, &y);
+        CHECK(placed && x == corners[corner][0] && y == corners[corner][1],
+              "corner %d placement is %.0f,%.0f instead of %.0f,%.0f", corner, x, y, corners[corner][0], corners[corner][1]);
+    }
+    { double x = -1, y = -1;
+      int placed = fps_overlay_position(FPS_OVERLAY_CORNER_TOP_LEFT, 10, 20, 50, 40, 40, 20, 6, 100, 100, 100, 100, &x, &y);
+      CHECK(placed && x >= 10 && y >= 20 && x + 40 <= 60 && y + 20 <= 60,
+            "narrow viewport placement escaped its bounds at %.0f,%.0f", x, y);
+      CHECK(!fps_overlay_position(FPS_OVERLAY_CORNER_TOP_RIGHT, 10, 20, 39, 40, 40, 20, 6, 0, 0, 0, 0, &x, &y),
+            "badge wider than the viewport was accepted"); }
+    fps_overlay_set_hud_mode(HUD_MODE_ALL);   /* restore the shared legacy mode for the remaining probes */
+
     /* The 5x7 pixel font (lines of ASCII only: the bottom-right load line): glyph pixels against the written patterns. */
     fps_overlay_raster_line("FPS 60  8x9", 0, 1, px, &w, &h);
     CHECK(w == 11 * 6 - 1 + 4 && h == 11, "box size %dx%d (\"FPS 60  8x9\" is 11 characters, one line)", w, h);

@@ -47,6 +47,22 @@ void fps_overlay_set_hud_mode(int mode) {
         atomic_store_explicit(&g_hud_mode, mode, memory_order_relaxed);
 }
 
+/* The TOTK iOS menu is the only caller. Keeping this opt-in separate preserves the legacy HUD on every other frontend. */
+static _Atomic int g_ios_clean_enabled;
+static _Atomic int g_ios_show_fps = 1;
+static _Atomic int g_ios_corner = FPS_OVERLAY_CORNER_TOP_RIGHT;
+void fps_overlay_set_ios_preferences(int show_fps, int corner) {
+    if (corner < FPS_OVERLAY_CORNER_TOP_LEFT || corner > FPS_OVERLAY_CORNER_BOTTOM_RIGHT)
+        corner = FPS_OVERLAY_CORNER_TOP_RIGHT;
+    atomic_store_explicit(&g_ios_corner, corner, memory_order_relaxed);
+    atomic_store_explicit(&g_ios_show_fps, !!show_fps, memory_order_relaxed);
+    fps_overlay_set_hud_mode(show_fps ? HUD_MODE_MINIMAL : HUD_MODE_OFF);
+    atomic_store_explicit(&g_ios_clean_enabled, 1, memory_order_release);
+}
+int fps_overlay_ios_clean_enabled(void) { return atomic_load_explicit(&g_ios_clean_enabled, memory_order_acquire); }
+int fps_overlay_ios_show_fps(void) { return atomic_load_explicit(&g_ios_show_fps, memory_order_relaxed); }
+int fps_overlay_ios_corner(void) { return atomic_load_explicit(&g_ios_corner, memory_order_relaxed); }
+
 int fps_overlay_enabled(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("TOTK_FPS_OVERLAY"); on = !(e && !strcmp(e, "0")); }
@@ -148,6 +164,55 @@ void fps_overlay_raster_line_tex(const char *text, int highlight, int scale, uin
 }
 void fps_overlay_raster_line(const char *text, int highlight, int scale, uint8_t *out, int *box_w, int *box_h) {
     fps_overlay_raster_line_tex(text, highlight, scale, out, FPS_OVERLAY_TEX_W, FPS_OVERLAY_TEX_H, box_w, box_h);
+}
+
+void fps_overlay_clean_text(int fps, char *out, size_t n) {
+    if (fps < 0) snprintf(out, n, "-- FPS");
+    else snprintf(out, n, "%d FPS", fps > 999 ? 999 : fps);
+}
+
+/* The compact iOS badge: soft cream text on a dark translucent box. BGRA is straight alpha; the present pipeline blends it. */
+void fps_overlay_raster_clean_fps(int fps, int scale, uint8_t *out, int *box_w, int *box_h) {
+    static const uint8_t text_color[4] = {226, 235, 242, 255}, box_color[4] = {12, 14, 16, 176};
+    char text[16];
+    fps_overlay_clean_text(fps, text, sizeof text);
+    int n = (int)strlen(text);
+    if (scale < 1) scale = 1;
+    if (scale > FPS_OVERLAY_MAX_SCALE) scale = FPS_OVERLAY_MAX_SCALE;
+    while (scale > 1 && ((n * ADVANCE - 1 + 2 * PAD) * scale > FPS_OVERLAY_TEX_W || BOX_ROWS * scale > FPS_OVERLAY_TEX_H)) scale--;
+    while (n > 1 && (n * ADVANCE - 1 + 2 * PAD) > FPS_OVERLAY_TEX_W) n--;
+    int w = (n * ADVANCE - 1 + 2 * PAD) * scale, h = BOX_ROWS * scale;
+    memset(out, 0, (size_t)FPS_OVERLAY_TEX_W * FPS_OVERLAY_TEX_H * 4);
+    fill(out, FPS_OVERLAY_TEX_W, 0, 0, w, h, box_color);
+    draw_text(out, FPS_OVERLAY_TEX_W, text, n, scale, text_color);
+    *box_w = w; *box_h = h;
+}
+
+static double nonnegative(double value) { return value > 0 ? value : 0; }
+static double clamp_position(double value, double low, double high) {
+    return value < low ? low : value > high ? high : value;
+}
+int fps_overlay_position(int corner, double origin_x, double origin_y, double width, double height,
+                         double box_w, double box_h, double margin,
+                         double inset_left, double inset_right, double inset_top, double inset_bottom,
+                         double *x, double *y) {
+    if (!x || !y || corner < FPS_OVERLAY_CORNER_TOP_LEFT || corner > FPS_OVERLAY_CORNER_BOTTOM_RIGHT ||
+        !isfinite(origin_x) || !isfinite(origin_y) || !isfinite(width) || !isfinite(height) ||
+        !isfinite(box_w) || !isfinite(box_h) || !isfinite(margin) || width <= 0 || height <= 0 || box_w <= 0 || box_h <= 0 ||
+        box_w > width || box_h > height)
+        return 0;
+    margin = nonnegative(margin);
+    double min_x = origin_x, max_x = origin_x + width - box_w;
+    double min_y = origin_y, max_y = origin_y + height - box_h;
+    int left = corner == FPS_OVERLAY_CORNER_TOP_LEFT || corner == FPS_OVERLAY_CORNER_BOTTOM_LEFT;
+    int top = corner == FPS_OVERLAY_CORNER_TOP_LEFT || corner == FPS_OVERLAY_CORNER_TOP_RIGHT;
+    double desired_x = left ? origin_x + margin + nonnegative(inset_left)
+                            : origin_x + width - margin - box_w - nonnegative(inset_right);
+    double desired_y = top ? origin_y + margin + nonnegative(inset_top)
+                           : origin_y + height - margin - box_h - nonnegative(inset_bottom);
+    *x = clamp_position(desired_x, min_x, max_x);
+    *y = clamp_position(desired_y, min_y, max_y);
+    return 1;
 }
 
 void fps_overlay_text(const fps_overlay_info *info, char *text, size_t n) {
