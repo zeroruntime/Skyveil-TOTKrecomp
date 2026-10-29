@@ -4,7 +4,8 @@
    the bottom, X at the top and Y on the left. PlayStation, Xbox and other controllers are mapped by position, so each
    button sits where the game's Switch prompt shows it; Nintendo controllers keep GameController's own mapping.
    TOTK_FACE_BUTTONS=label maps every controller by label (the earlier behaviour), =position every one by position.
-   Plain C, shared by runtime/gamepad.m (Mac and iOS) and tests/gamepad_layout/probe.c. */
+   TOTK_SWAP_CONTROLLER_LAYOUT=1 opts into a final A/B, X/Y swap for gameplay physical controllers after this
+   controller-specific mapping. Plain C, shared by runtime/gamepad.m (Mac and iOS) and tests/gamepad_layout/probe.c. */
 #pragma once
 #include <ctype.h>
 #include <stdint.h>
@@ -96,4 +97,24 @@ static inline uint64_t gamepad_face_bits(int bottom, int right, int left, int to
     if (by_position)
         return (right ? GAMEPAD_SWITCH_A : 0) | (bottom ? GAMEPAD_SWITCH_B : 0) | (top ? GAMEPAD_SWITCH_X : 0) | (left ? GAMEPAD_SWITCH_Y : 0);
     return (bottom ? GAMEPAD_SWITCH_A : 0) | (right ? GAMEPAD_SWITCH_B : 0) | (left ? GAMEPAD_SWITCH_X : 0) | (top ? GAMEPAD_SWITCH_Y : 0);
+}
+
+/* Swap the opposing face positions after Auto/type/label-vs-position mapping. The default controller map turns east /
+   south / north / west into Switch A / B / X / Y, so this permutation swaps those final A/B and X/Y results while
+   leaving every other physical input untouched. */
+static inline uint64_t gamepad_invert_face_layout(uint64_t physical) {
+    const uint64_t face_mask = 0x0f;
+    uint64_t faces = physical & face_mask;
+    uint64_t swapped = ((faces & 0x1) << 1) | ((faces & 0x2) >> 1) |
+                       ((faces & 0x4) << 1) | ((faces & 0x8) >> 1);
+    return (physical & ~face_mask) | swapped;
+}
+
+/* The preference bridge writes exactly "1" or "0". Only "1" enables the swap; unknown values stay off. */
+static inline int gamepad_face_layout_swap_enabled(const char *value) {
+    return value && !strcmp(value, "1");
+}
+
+static inline int gamepad_face_layout_swap_from_environment(void) {
+    return gamepad_face_layout_swap_enabled(getenv("TOTK_SWAP_CONTROLLER_LAYOUT"));
 }

@@ -37,6 +37,7 @@ static int settingsChordFired;
 static uint16_t controllerMap[CONTROLLER_BUTTONS];
 static uint8_t controllerModes[CONTROLLER_BUTTONS];
 static uint64_t physicalPrev;
+static int swapFaceLayout;
 static uint64_t tapUntil[CONTROLLER_BUTTONS];   /* ns, for tap */
 static int toggleOn[CONTROLLER_BUTTONS];        /* for toggle */
 static int toggleMoved[CONTROLLER_BUTTONS];     /* the stick moved since the toggle went on */
@@ -478,6 +479,9 @@ static void refresh_gamepads(void) {
         next.rx = stronger_axis(next.rx, hidPad.rx);
         next.ry = stronger_axis(next.ry, hidPad.ry);
     }
+    /* Keep UI capture on the controller's raw A/B/X/Y positions; only gameplay mappings get the final inversion. */
+    uint64_t textPhysical = physical;
+    if (swapFaceLayout) physical = gamepad_invert_face_layout(physical);
     /* Modes work on the physical buttons, not on the mapped ones: two physical buttons may share a Switch button
        (X and L3 both running), and a mapped edge would be lost while the other one is held. */
     uint64_t now = runtime_now_ns(), edges = physical & ~physicalPrev, synthetic = 0, suppressed = 0;
@@ -515,8 +519,8 @@ static void refresh_gamepads(void) {
     int chord = settingsShortcutEnabled && (physical & SETTINGS_CHORD) == SETTINGS_CHORD;
     if (chord && !settingsShortcutDown) { settingsChordSince = now; settingsChordFired = 0; }   /* the game keeps it until the second is up */
     settingsShortcutDown = chord;
-    textEdges |= (physical & 0x1ffffu) & ~textPad.buttons;
-    textPad = next; textPad.buttons = physical & 0x1ffffu;
+    textEdges |= (textPhysical & 0x1ffffu) & ~textPad.buttons;
+    textPad = next; textPad.buttons = textPhysical & 0x1ffffu;
     pressedEdges |= next.buttons & ~gamepadState.buttons;
     gamepadState = next;
     gamepadRawLeftAt = rawAt;
@@ -572,6 +576,7 @@ void runtime_gamepad_start(void) {
     started = YES;
     load_controller_map();
     load_controller_type();
+    swapFaceLayout = gamepad_face_layout_swap_from_environment();
     load_mouse_mode();
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     [center addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue

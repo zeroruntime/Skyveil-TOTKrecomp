@@ -1,6 +1,7 @@
 #import "main_menu.h"
 
 #import <AVFoundation/AVFoundation.h>
+#import <GameController/GameController.h>
 #import <math.h>
 #import <stdlib.h>
 #import "../../third_party/d2r_gfx/gfx/nvn/fps_overlay.h"
@@ -19,13 +20,22 @@
 @property(nonatomic, strong) UIScrollView *settingsScrollView;
 @property(nonatomic, strong) NSArray<UIStackView *> *settingsPages;
 @property(nonatomic, strong) NSArray<UIButton *> *settingsTabButtons;
+@property(nonatomic, strong) NSArray<NSArray<UIControl *> *> *settingsPageControllerItems;
+@property(nonatomic, strong) UIButton *settingsCloseButton;
 @property(nonatomic, strong) UILabel *masterVolumeValueLabel;
 @property(nonatomic, strong) UISlider *masterVolumeSlider;
+@property(nonatomic, strong) NSTimer *controllerPollTimer;
+@property(nonatomic, strong) GCController *lastPolledController;
+@property(nonatomic, weak) UIView *controllerFocusedView;
+@property(nonatomic, strong) CALayer *controllerFocusRing;
 @property(nonatomic) NSUInteger selectedSettingsTab;
+@property(nonatomic) NSUInteger launcherFocusIndex;
+@property(nonatomic) NSUInteger settingsFocusIndex;
 @property(nonatomic) CGSize videoSize;
 @property(nonatomic) NSUInteger playbackGeneration;
 @property(nonatomic) BOOL leavingForGame;
 @property(nonatomic) BOOL observingLifecycle;
+@property(nonatomic) BOOL controllerInputHeld;
 - (BOOL)iosFpsOverlayEnabledPreference;
 - (NSInteger)iosFpsOverlayCornerPreference;
 - (void)applyFpsOverlayPreferences;
@@ -120,16 +130,23 @@
     button.translatesAutoresizingMaskIntoConstraints = NO;
     [button.widthAnchor constraintEqualToConstant:220].active = YES;
     [button.heightAnchor constraintGreaterThanOrEqualToConstant:56].active = YES;
+    __weak typeof(self) weakSelf = self;
     button.configurationUpdateHandler = ^(UIButton *updatedButton) {
         UIButtonConfiguration *updated = updatedButton.configuration;
+        BOOL focused = weakSelf.controllerFocusedView == updatedButton;
+        UIColor *dark = [UIColor colorWithRed:0.11 green:0.12 blue:0.11 alpha:1.0];
+        UIColor *focusGold = [UIColor colorWithRed:0.92 green:0.77 blue:0.49 alpha:1.0];
         UIColor *base = primary ? gold : cream;
-        updated.baseForegroundColor = updatedButton.isHighlighted
-            ? [base colorWithAlphaComponent:0.72]
-            : base;
-        updated.background.backgroundColor = updatedButton.isHighlighted
-            ? [UIColor colorWithRed:0.72 green:0.60 blue:0.34 alpha:0.28]
-            : (primary ? [UIColor colorWithRed:0.63 green:0.51 blue:0.27 alpha:0.18]
-                       : [UIColor colorWithWhite:0 alpha:0.04]);
+        if (focused) {
+            updated.baseForegroundColor = dark;
+            updated.background.backgroundColor = focusGold;
+        } else {
+            updated.baseForegroundColor = updatedButton.isHighlighted ? [base colorWithAlphaComponent:0.72] : base;
+            updated.background.backgroundColor = updatedButton.isHighlighted
+                ? [UIColor colorWithRed:0.72 green:0.60 blue:0.34 alpha:0.28]
+                : (primary ? [UIColor colorWithRed:0.63 green:0.51 blue:0.27 alpha:0.18]
+                           : [UIColor colorWithWhite:0 alpha:0.04]);
+        }
         updatedButton.configuration = updated;
     };
     return button;
@@ -148,6 +165,7 @@
                                         scaled.width,
                                         scaled.height);
     self.legibilityGradient.frame = bounds;
+    [self updateControllerFocusRing];
 }
 
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
@@ -157,10 +175,12 @@
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self updatePlaybackState];
+    [self startControllerPolling];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    [self stopControllerPolling];
     [self.player pause];
 }
 
@@ -230,21 +250,239 @@
 - (void)applicationWillResignActive:(NSNotification *)notification {
     (void)notification;
     [self.player pause];
+    [self stopControllerPolling];
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
     (void)notification;
     [self updatePlaybackState];
+    [self startControllerPolling];
 }
 
 - (void)sceneWillDeactivate:(NSNotification *)notification {
     (void)notification;
     [self updatePlaybackState];
+    [self stopControllerPolling];
 }
 
 - (void)sceneDidActivate:(NSNotification *)notification {
     (void)notification;
     [self updatePlaybackState];
+    [self startControllerPolling];
+}
+
+- (void)startControllerPolling {
+    if (self.controllerPollTimer || self.leavingForGame || ![self menuIsVisibleAndActive]) return;
+    self.controllerInputHeld = YES; // Require one neutral sample after launch or foregrounding.
+    self.lastPolledController = nil;
+    __weak typeof(self) weakSelf = self;
+    NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60.0 repeats:YES block:^(NSTimer *tick) {
+        (void)tick;
+        [weakSelf pollController];
+    }];
+    self.controllerPollTimer = timer;
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)stopControllerPolling {
+    [self.controllerPollTimer invalidate];
+    self.controllerPollTimer = nil;
+    self.lastPolledController = nil;
+    self.controllerInputHeld = NO;
+    [self setControllerFocusView:nil];
+}
+
+- (NSArray<UIControl *> *)controllerSettingsItems {
+    if (!self.settingsOverlay) return @[];
+    NSMutableArray<UIControl *> *items = [NSMutableArray array];
+    if (self.selectedSettingsTab < self.settingsPageControllerItems.count) {
+        [items addObjectsFromArray:self.settingsPageControllerItems[self.selectedSettingsTab]];
+    }
+    if (self.settingsCloseButton) [items addObject:self.settingsCloseButton];
+    return items;
+}
+
+- (NSArray<UIControl *> *)activeControllerItems {
+    if (self.leavingForGame) return @[];
+    if (self.settingsOverlay) return [self controllerSettingsItems];
+    return self.playButton && self.settingsButton ? @[self.playButton, self.settingsButton] : @[];
+}
+
+- (void)setControllerFocusView:(UIView *)view {
+    UIView *previous = self.controllerFocusedView;
+    [self.controllerFocusRing removeFromSuperlayer];
+    self.controllerFocusRing = nil;
+    self.controllerFocusedView = view;
+
+    if (previous == self.playButton || previous == self.settingsButton) {
+        [(UIButton *)previous setNeedsUpdateConfiguration];
+    }
+    if (view == self.playButton || view == self.settingsButton) {
+        [(UIButton *)view setNeedsUpdateConfiguration];
+        return;
+    }
+    if (!view) return;
+
+    UIColor *gold = [UIColor colorWithRed:0.98 green:0.78 blue:0.32 alpha:1.0];
+    CALayer *ring = [CALayer layer];
+    ring.name = @"TOTKControllerFocusRing";
+    ring.frame = view.bounds;
+    ring.borderWidth = 3;
+    ring.borderColor = gold.CGColor;
+    ring.cornerRadius = MAX(view.layer.cornerRadius, 7);
+    ring.backgroundColor = UIColor.clearColor.CGColor;
+    [view.layer addSublayer:ring];
+    self.controllerFocusRing = ring;
+}
+
+- (void)updateControllerFocusRing {
+    UIView *view = self.controllerFocusedView;
+    if (!view || !self.controllerFocusRing) return;
+    self.controllerFocusRing.frame = view.bounds;
+    self.controllerFocusRing.cornerRadius = MAX(view.layer.cornerRadius, 7);
+}
+
+- (void)updateControllerFocus {
+    NSArray<UIControl *> *items = [self activeControllerItems];
+    if (!self.lastPolledController || !items.count || self.leavingForGame) {
+        [self setControllerFocusView:nil];
+        return;
+    }
+
+    NSUInteger *focusIndex = self.settingsOverlay ? &_settingsFocusIndex : &_launcherFocusIndex;
+    *focusIndex = MIN(*focusIndex, items.count - 1);
+    UIControl *focused = items[*focusIndex];
+    [self setControllerFocusView:focused];
+
+    if (self.settingsOverlay && focused != self.settingsCloseButton) {
+        CGRect target = [focused convertRect:focused.bounds toView:self.settingsScrollView];
+        [self.settingsScrollView scrollRectToVisible:CGRectInset(target, 0, -8) animated:YES];
+    }
+}
+
+- (void)moveControllerFocus:(NSInteger)direction {
+    NSArray<UIControl *> *items = [self activeControllerItems];
+    if (!items.count) return;
+    NSUInteger *focusIndex = self.settingsOverlay ? &_settingsFocusIndex : &_launcherFocusIndex;
+    *focusIndex = MIN(*focusIndex, items.count - 1);
+    if (direction < 0 && *focusIndex > 0) (*focusIndex)--;
+    else if (direction > 0 && *focusIndex + 1 < items.count) (*focusIndex)++;
+    [self updateControllerFocus];
+}
+
+- (void)activateControllerItem:(UIControl *)item {
+    if ([item isKindOfClass:UIButton.class]) [item sendActionsForControlEvents:UIControlEventTouchUpInside];
+}
+
+- (UISwitch *)toggleControlInRow:(UIButton *)row {
+    for (UIView *subview in row.subviews) {
+        if ([subview isKindOfClass:UISwitch.class]) return (UISwitch *)subview;
+    }
+    return nil;
+}
+
+- (void)moveSettingsTab:(NSInteger)direction {
+    if (!self.settingsOverlay || !self.settingsTabButtons.count) return;
+    NSInteger next = MAX(0, MIN((NSInteger)self.settingsTabButtons.count - 1,
+                                (NSInteger)self.selectedSettingsTab + direction));
+    if (next != (NSInteger)self.selectedSettingsTab) {
+        [self.settingsTabButtons[(NSUInteger)next] sendActionsForControlEvents:UIControlEventTouchUpInside];
+    }
+}
+
+- (void)changeControllerValueForItem:(UIControl *)item direction:(NSInteger)direction {
+    if ([item isKindOfClass:UISegmentedControl.class]) {
+        UISegmentedControl *segmented = (UISegmentedControl *)item;
+        NSInteger next = MAX(0, MIN((NSInteger)segmented.numberOfSegments - 1, segmented.selectedSegmentIndex + direction));
+        if (next != segmented.selectedSegmentIndex) {
+            segmented.selectedSegmentIndex = next;
+            [segmented sendActionsForControlEvents:UIControlEventValueChanged];
+        }
+        return;
+    }
+
+    if ([item isKindOfClass:UISlider.class]) {
+        UISlider *slider = (UISlider *)item;
+        slider.value = MAX(slider.minimumValue, MIN(slider.maximumValue, slider.value + (float)direction * 5.0f));
+        [slider sendActionsForControlEvents:UIControlEventValueChanged];
+        return;
+    }
+
+    if ([item isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)item;
+        UISwitch *toggle = [self toggleControlInRow:button];
+        if (toggle) {
+            BOOL shouldBeOn = direction > 0;
+            if (toggle.isOn != shouldBeOn) [button sendActionsForControlEvents:UIControlEventTouchUpInside];
+        }
+    }
+}
+
+- (void)pollController {
+    if (self.leavingForGame || ![self menuIsVisibleAndActive]) {
+        [self stopControllerPolling];
+        return;
+    }
+
+    GCController *controller = GCController.current;
+    if (!controller.extendedGamepad) {
+        controller = nil;
+        for (GCController *candidate in GCController.controllers) {
+            if (candidate.extendedGamepad) { controller = candidate; break; }
+        }
+    }
+    GCExtendedGamepad *gamepad = controller.extendedGamepad;
+    if (!gamepad) {
+        self.lastPolledController = nil;
+        self.controllerInputHeld = NO;
+        [self setControllerFocusView:nil];
+        return;
+    }
+    if (controller != self.lastPolledController) {
+        self.lastPolledController = controller;
+        self.controllerInputHeld = YES; // A held button on a reconnect cannot activate the menu immediately.
+        [self updateControllerFocus];
+    }
+
+    float x = gamepad.leftThumbstick.xAxis.value;
+    float y = gamepad.leftThumbstick.yAxis.value;
+    BOOL up = gamepad.dpad.up.isPressed || y > 0.5f;
+    BOOL down = gamepad.dpad.down.isPressed || y < -0.5f;
+    BOOL left = gamepad.dpad.left.isPressed || x < -0.5f;
+    BOOL right = gamepad.dpad.right.isPressed || x > 0.5f;
+    BOOL activate = gamepad.buttonA.isPressed;
+    BOOL back = gamepad.buttonB.isPressed;
+    BOOL shoulderLeft = gamepad.leftShoulder.isPressed;
+    BOOL shoulderRight = gamepad.rightShoulder.isPressed;
+    BOOL any = up || down || left || right || activate || back || shoulderLeft || shoulderRight;
+    if (!any) { self.controllerInputHeld = NO; return; }
+    if (self.controllerInputHeld) return;
+    self.controllerInputHeld = YES;
+
+    if (back && self.settingsOverlay) {
+        [self closeSettings];
+        [self updateControllerFocus];
+        return;
+    }
+    if (self.settingsOverlay && (shoulderLeft || shoulderRight)) {
+        [self moveSettingsTab:shoulderRight ? 1 : -1];
+        return;
+    }
+    if (activate) {
+        NSArray<UIControl *> *items = [self activeControllerItems];
+        NSUInteger focusIndex = self.settingsOverlay ? self.settingsFocusIndex : self.launcherFocusIndex;
+        if (focusIndex < items.count) [self activateControllerItem:items[focusIndex]];
+        [self updateControllerFocus];
+        return;
+    }
+    if (up) [self moveControllerFocus:-1];
+    else if (down) [self moveControllerFocus:1];
+    else if (left || right) {
+        NSArray<UIControl *> *items = [self activeControllerItems];
+        NSUInteger focusIndex = self.settingsOverlay ? self.settingsFocusIndex : self.launcherFocusIndex;
+        if (focusIndex < items.count) [self changeControllerValueForItem:items[focusIndex] direction:(right ? 1 : -1)];
+        [self updateControllerFocus];
+    }
 }
 
 - (void)playTapped:(UIButton *)sender {
@@ -254,6 +492,7 @@
     self.playButton.enabled = NO;
     self.settingsButton.enabled = NO;
 
+    [self stopControllerPolling];
     [self stopPlayback];
     void (^playHandler)(void) = self.playHandler;
     self.playHandler = nil;
@@ -331,6 +570,28 @@
     title.font = [UIFont fontWithName:@"Georgia" size:26] ?: [UIFont systemFontOfSize:26 weight:UIFontWeightSemibold];
     title.textColor = gold;
     title.accessibilityTraits = UIAccessibilityTraitHeader;
+
+    UISegmentedControl *displayMode = [[UISegmentedControl alloc] initWithItems:@[@"Handheld (720p)", @"Docked (1080p)"]];
+    displayMode.translatesAutoresizingMaskIntoConstraints = NO;
+    displayMode.selectedSegmentIndex = [NSUserDefaults.standardUserDefaults boolForKey:@"TOTK_DOCKED"] ? 1 : 0;
+    [displayMode.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    displayMode.selectedSegmentTintColor = gold;
+    displayMode.accessibilityLabel = @"Display mode";
+    displayMode.accessibilityHint = @"Handheld uses 1280 by 720. Docked uses 1080p output with a 1600 by 900 scene and may reduce performance.";
+    [displayMode setTitleTextAttributes:@{NSForegroundColorAttributeName: cream,
+                                         NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightMedium]}
+                                forState:UIControlStateNormal];
+    [displayMode setTitleTextAttributes:@{NSForegroundColorAttributeName: dark,
+                                         NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold]}
+                                forState:UIControlStateSelected];
+    [displayMode addTarget:self action:@selector(displayModeChanged:) forControlEvents:UIControlEventValueChanged];
+    UILabel *displayModeTitle = [self settingsLabel:@"Picture quality" font:[UIFont systemFontOfSize:20 weight:UIFontWeightSemibold] color:cream];
+    UILabel *displayModeDescription = [self settingsLabel:@"Docked uses 1080p output with a 1600×900 scene and may reduce performance." font:[UIFont systemFontOfSize:17] color:[cream colorWithAlphaComponent:0.82]];
+    displayModeDescription.numberOfLines = 0;
+    UIStackView *displayModeGroup = [[UIStackView alloc] initWithArrangedSubviews:@[displayModeTitle, displayModeDescription, displayMode]];
+    displayModeGroup.axis = UILayoutConstraintAxisVertical;
+    displayModeGroup.alignment = UIStackViewAlignmentFill;
+    displayModeGroup.spacing = 8;
 
     UIButton *fpsOverlayRow = [self makeSettingsToggleRowWithTitle:@"Show FPS"
                                                              detail:@"Show a compact, measured frame-rate badge during play."
@@ -426,11 +687,21 @@
                                                      isEnabled:totk_phone_setting_enabled(@"TOTK_PHONE_HAPTICS")
                                                         tag:102
                                                      action:@selector(hapticsRowTapped:)];
+    UIButton *swapControllerLayoutRow = [self makeSettingsToggleRowWithTitle:@"Swap Controller Layout"
+                                                                      detail:@"Swaps physical A/B and X/Y buttons during gameplay only. Menu and touch controls are unchanged."
+                                                                    isEnabled:[NSUserDefaults.standardUserDefaults boolForKey:@"TOTK_SWAP_CONTROLLER_LAYOUT"]
+                                                                         tag:104
+                                                                      action:@selector(swapControllerLayoutRowTapped:)];
 
-    UIStackView *displayPage = [[UIStackView alloc] initWithArrangedSubviews:@[fpsOverlayRow, fpsCornerGroup, frameRateGroup]];
+    UIStackView *displayPage = [[UIStackView alloc] initWithArrangedSubviews:@[displayModeGroup, fpsOverlayRow, fpsCornerGroup, frameRateGroup]];
     UIStackView *audioPage = [[UIStackView alloc] initWithArrangedSubviews:@[volumeGroup]];
-    UIStackView *controlsPage = [[UIStackView alloc] initWithArrangedSubviews:@[gyroRow, hapticsRow]];
+    UIStackView *controlsPage = [[UIStackView alloc] initWithArrangedSubviews:@[gyroRow, hapticsRow, swapControllerLayoutRow]];
     self.settingsPages = @[displayPage, audioPage, controlsPage];
+    self.settingsPageControllerItems = @[
+        @[displayMode, fpsOverlayRow, fpsCorner, frameRate],
+        @[volumeSlider],
+        @[gyroRow, hapticsRow, swapControllerLayoutRow]
+    ];
     for (UIStackView *page in self.settingsPages) {
         page.axis = UILayoutConstraintAxisVertical;
         page.alignment = UIStackViewAlignmentFill;
@@ -439,7 +710,7 @@
     }
 
     NSArray<NSString *> *tabTitles = @[@"Display", @"Audio", @"Controls"];
-    NSArray<NSString *> *tabHints = @[@"Show display and frame-rate settings.", @"Adjust master volume.", @"Show gyro and vibration controls."];
+    NSArray<NSString *> *tabHints = @[@"Show display and frame-rate settings.", @"Adjust master volume.", @"Show gyro, vibration, and controller layout controls."];
     NSMutableArray<UIButton *> *tabButtons = [NSMutableArray arrayWithCapacity:tabTitles.count];
     UIStackView *tabBar = [[UIStackView alloc] init];
     tabBar.translatesAutoresizingMaskIntoConstraints = NO;
@@ -517,6 +788,7 @@
     close.accessibilityHint = @"Dismisses this panel and returns to the main menu.";
     [close addTarget:self action:@selector(closeSettingsTapped:) forControlEvents:UIControlEventTouchUpInside];
     [close.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
+    self.settingsCloseButton = close;
 
     UIStackView *panelContent = [[UIStackView alloc] initWithArrangedSubviews:@[title, tabBar, scrollView, close]];
     panelContent.translatesAutoresizingMaskIntoConstraints = NO;
@@ -531,7 +803,9 @@
         [panelContent.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-18]
     ]];
 
+    self.settingsFocusIndex = 0;
     [self becomeFirstResponder];
+    [self updateControllerFocus];
     UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, title);
 }
 
@@ -555,6 +829,7 @@
     [currentPage removeFromSuperview];
     [self.settingsPageContainer addArrangedSubview:self.settingsPages[selected]];
     self.selectedSettingsTab = selected;
+    self.settingsFocusIndex = 0;
     for (NSUInteger index = 0; index < self.settingsPages.count; index++) {
         BOOL isSelected = index == selected;
         UIButton *tab = self.settingsTabButtons[index];
@@ -566,6 +841,7 @@
                   forState:UIControlStateNormal];
         [tab viewWithTag:1001].hidden = !isSelected;
     }
+    [self updateControllerFocus];
     UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, sender);
 }
 
@@ -681,16 +957,24 @@
     [NSUserDefaults.standardUserDefaults setObject:(fps == 30 ? @"30" : @"60") forKey:@"TOTK_PHONE_FPS"];
 }
 
+- (void)displayModeChanged:(UISegmentedControl *)control {
+    [NSUserDefaults.standardUserDefaults setBool:control.selectedSegmentIndex == 1 forKey:@"TOTK_DOCKED"];
+}
+
 - (void)gyroRowTapped:(UIButton *)row {
-    [self setPhoneToggleRow:row key:@"TOTK_PHONE_GYRO"];
+    [self setPreferenceToggleRow:row key:@"TOTK_PHONE_GYRO"];
 }
 
 - (void)hapticsRowTapped:(UIButton *)row {
-    [self setPhoneToggleRow:row key:@"TOTK_PHONE_HAPTICS"];
+    [self setPreferenceToggleRow:row key:@"TOTK_PHONE_HAPTICS"];
 }
 
-- (void)setPhoneToggleRow:(UIButton *)row key:(NSString *)key {
-    UISwitch *toggle = (UISwitch *)[row viewWithTag:([key isEqualToString:@"TOTK_PHONE_GYRO"] ? 101 : 102)];
+- (void)swapControllerLayoutRowTapped:(UIButton *)row {
+    [self setPreferenceToggleRow:row key:@"TOTK_SWAP_CONTROLLER_LAYOUT"];
+}
+
+- (void)setPreferenceToggleRow:(UIButton *)row key:(NSString *)key {
+    UISwitch *toggle = [self toggleControlInRow:row];
     if (!toggle) return;
     BOOL enabled = !toggle.isOn;
     [toggle setOn:enabled animated:YES];
@@ -721,14 +1005,18 @@
     UIControl *overlay = self.settingsOverlay;
     if (!overlay) return;
     self.settingsOverlay = nil;
+    self.settingsCloseButton = nil;
     self.playButton.accessibilityElementsHidden = NO;
     self.settingsButton.accessibilityElementsHidden = NO;
+    self.launcherFocusIndex = 1;
     [overlay removeFromSuperview];
     [self resignFirstResponder];
+    [self updateControllerFocus];
     UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, self.settingsButton);
 }
 
 - (void)stopPlayback {
+    [self stopControllerPolling];
     ++self.playbackGeneration;
     if (self.observingLifecycle) {
         [NSNotificationCenter.defaultCenter removeObserver:self];
@@ -746,6 +1034,7 @@
 }
 
 - (void)dealloc {
+    [self.controllerPollTimer invalidate];
     if (self.observingLifecycle) [NSNotificationCenter.defaultCenter removeObserver:self];
     [self.player pause];
     [self.playerLooper disableLooping];

@@ -1,6 +1,6 @@
 # TOTK iOS Menu Handoff
 
-Date: 2026-10-27
+Date: 2026-10-29
 
 ## Tested checkpoint
 - Branch: `codex/totk-main-menu`; menu checkpoint `8ff34b8`. This note records the Settings checkpoint; tag `totk-settings-tested-2026-10-27` will point to its commit.
@@ -16,6 +16,10 @@ Date: 2026-10-27
 ## Menu and build notes
 - Optional local video: `game_essentials/totk_menu_video.mp4` (H.264, 1080p60, about 32 seconds / 13 MB); it is not versioned. The packager accepts `--menu-video`, and the normal TOTK iOS root builder detects the file when present.
 - Menu is full-bleed video with a top-aligned, vertically centered right-side button list (30 pt type, 0.2 tracking, 4 pt gaps); Play keeps the existing startup path. BOTW and vision direct-start behavior remain intact.
+- Display settings include Handheld (720p) and Docked (1080p), saved to the existing `TOTK_DOCKED` preference. Docked mode uses 1920×1080 output with a 1600×900 scene; Handheld keeps the 1280×720 default. The selected mode is applied from Play before the game view attaches its Metal layer or shader preparation starts. Explicit `TOTK_IOS_DRAWABLE_H` and `TOTK_RENDER_RES` environment values continue to take precedence.
+- A connected extended gamepad moves launcher focus between Play and Settings with the D-pad or left stick. Focus uses a warm-gold fill with dark text. In Settings, focus starts at the first setting and moves through that page’s controls and Close; LB/RB changes tabs and returns focus to the first setting. Left/right changes segmented values and volume or sets a toggle off/on. A activates buttons and toggles, and B returns to the launcher. Settings rows show a gold focus border.
+- Controls includes Swap Controller Layout, saved as TOTK_SWAP_CONTROLLER_LAYOUT (off by default). It swaps the physical A/B and X/Y gameplay buttons only; menu navigation and touch controls are unchanged.
+- Held controller input triggers once until released. Launch, foregrounding, disconnect, and reconnect require a neutral sample before accepting input, and polling stops when the menu leaves for gameplay.
 - Cached local build helper: `game_essentials/TOTK_menu_build/run_cached_ipa.py`; it reuses verified ARM64 dependencies and skips the dependency step. Outputs and logs are local; original `TOTK_build` files are preserved.
 
 ## Proposed follow-up (not approved)

@@ -153,23 +153,120 @@ class DeviceSeedPush(unittest.TestCase):
 
 
 class FullHD(unittest.TestCase):
-    """Settings › Full HD (docked): off by default, Tears of the Kingdom only, with the 1600x900 scene (1.4.3 renders
-    960x540 on the phone otherwise), and no switch in Breath of the Wild's Settings pane (build_ipa.py)."""
+    """The TOTK menu's Display choice uses the existing Settings.bundle key and is applied before game startup."""
     def test_switch_off_by_default_and_docked_at_1600x900(self):
-        import plistlib, re
+        import plistlib
         ios = TOOLS.parent
         specs = plistlib.loads((ios/'Settings.bundle/Root.plist').read_bytes())['PreferenceSpecifiers']
         switch = [s for s in specs if s.get('Key') == 'TOTK_DOCKED']
         self.assertEqual(len(switch), 1)
         self.assertIs(switch[0]['DefaultValue'], False)
         main = (ios/'Sources/main.m').read_text()
-        branch = re.search(r'#ifndef GAME_BOTW\n(.*?)#endif', main[main.index('TOTK_DOCKED') - 200:], re.S)
-        self.assertTrue(branch and 'TOTK_DOCKED' in branch.group(1))
-        for line in ('"TOTK_OPERATION_MODE","docked"', '"TOTK_IOS_DRAWABLE_H","1080"', '"TOTK_RENDER_RES","1600x900"'):
-            self.assertIn(line, branch.group(1))
+        helper_start = main.index('static void apply_totk_display_preferences')
+        helper_end = main.index('\n#endif', helper_start)
+        helper = main[helper_start:helper_end]
+        self.assertIn('boolForKey:@"TOTK_DOCKED"', helper)
+        for line in ('"TOTK_OPERATION_MODE", "docked"', '"TOTK_OPERATION_MODE", "handheld"',
+                     '"TOTK_IOS_DRAWABLE_H", "1080"', '"TOTK_RENDER_RES", "1600x900"'):
+            self.assertIn(line, helper)
+        helper_guard = main.rfind('#if !TARGET_OS_VISION && !defined(GAME_BOTW)', 0, helper_start)
+        self.assertGreaterEqual(helper_guard, 0)
+
+        play_start = main.index('menu.playHandler = ^{')
+        play_end = main.index('self.window.rootViewController = menu;', play_start)
+        play_handler = main[play_start:play_end]
+        self.assertLess(play_handler.index('apply_totk_display_preferences();'), play_handler.index('TOTKGameController *game'))
+        finish = main.index('- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:')
+        self.assertNotIn('boolForKey:@"TOTK_DOCKED"', main[finish:], 'the menu choice must be read after launch')
+        self.assertIn('#ifdef GAME_BOTW\n    /* Breath of the Wild has no docked choice', main[finish:])
+
+        menu = (ios/'Sources/main_menu.m').read_text()
+        self.assertIn('@[@"Handheld (720p)", @"Docked (1080p)"]', menu)
+        self.assertIn('setBool:control.selectedSegmentIndex == 1 forKey:@"TOTK_DOCKED"', menu)
         build = (TOOLS/'build_ipa.py').read_text()
         self.assertIn("s.get('Key')=='TOTK_DOCKED'", build)
         self.assertIn("'      - path: Gen/Settings.bundle'", build)
+
+
+class MenuControllerNavigation(unittest.TestCase):
+    """Menu controller polling stays active only on the launcher and covers every visible control."""
+    @classmethod
+    def setUpClass(cls):
+        cls.menu = (TOOLS.parent/'Sources/main_menu.m').read_text()
+
+    def test_tabs_use_shoulders_and_reset_focus_to_first_setting(self):
+        focus_list = self.menu[self.menu.index('- (NSArray<UIControl *> *)controllerSettingsItems {'):
+                               self.menu.index('- (NSArray<UIControl *> *)activeControllerItems {')]
+        self.assertIn('self.settingsPageControllerItems[self.selectedSettingsTab]', focus_list)
+        self.assertIn('[items addObject:self.settingsCloseButton]', focus_list)
+        self.assertNotIn('settingsTabButtons', focus_list)
+        self.assertIn('@[gyroRow, hapticsRow, swapControllerLayoutRow]', self.menu)
+        self.assertIn('scrollRectToVisible:', self.menu)
+
+        poll = self.menu[self.menu.index('- (void)pollController {'):
+                         self.menu.index('- (void)playTapped:', self.menu.index('- (void)pollController {'))]
+        self.assertIn('gamepad.leftShoulder.isPressed', poll)
+        self.assertIn('gamepad.rightShoulder.isPressed', poll)
+        self.assertIn('[self moveSettingsTab:shoulderRight ? 1 : -1];', poll)
+        tab_start = self.menu.index('- (void)settingsTabTapped:(UIButton *)sender {')
+        tab_end = self.menu.index('\n- (NSInteger)iosMasterVolumePreference {', tab_start)
+        tab_handler = self.menu[tab_start:tab_end]
+        self.assertIn('self.settingsFocusIndex = 0;', tab_handler)
+        self.assertIn('self.selectedSettingsTab = selected;', tab_handler)
+
+    def test_dpad_and_stick_navigate_and_change_values_with_a_and_b_actions(self):
+        poll = self.menu[self.menu.index('- (void)pollController {'):
+                         self.menu.index('- (void)playTapped:', self.menu.index('- (void)pollController {'))]
+        self.assertIn('gamepad.dpad.up.isPressed', poll)
+        self.assertIn('gamepad.dpad.down.isPressed', poll)
+        self.assertIn('gamepad.leftThumbstick.xAxis.value', poll)
+        self.assertIn('gamepad.leftThumbstick.yAxis.value', poll)
+        self.assertIn('BOOL activate = gamepad.buttonA.isPressed;', poll)
+        self.assertIn('BOOL back = gamepad.buttonB.isPressed;', poll)
+        self.assertIn('[self closeSettings];', poll)
+        self.assertIn('sendActionsForControlEvents:UIControlEventValueChanged', self.menu)
+        self.assertIn('sendActionsForControlEvents:UIControlEventTouchUpInside', self.menu)
+        self.assertIn('BOOL shouldBeOn = direction > 0;', self.menu)
+        self.assertIn('slider.value + (float)direction * 5.0f', self.menu)
+        self.assertIn('if (!any) { self.controllerInputHeld = NO; return; }', poll)
+
+    def test_controller_layout_toggle_persists_and_only_describes_gameplay_mapping(self):
+        self.assertIn('isEnabled:[NSUserDefaults.standardUserDefaults boolForKey:@"TOTK_SWAP_CONTROLLER_LAYOUT"]', self.menu)
+        self.assertIn('detail:@"Swaps physical A/B and X/Y buttons during gameplay only. Menu and touch controls are unchanged."', self.menu)
+        self.assertIn('action:@selector(swapControllerLayoutRowTapped:)', self.menu)
+        swap_handler = self.menu[self.menu.index('- (void)swapControllerLayoutRowTapped:'):
+                                 self.menu.index('- (void)setPreferenceToggleRow:')]
+        self.assertIn('key:@"TOTK_SWAP_CONTROLLER_LAYOUT"', swap_handler)
+        toggle_handler = self.menu[self.menu.index('- (void)setPreferenceToggleRow:'):
+                                   self.menu.index('- (void)settingsScrimTapped:')]
+        self.assertIn('BOOL enabled = !toggle.isOn;', toggle_handler)
+        self.assertIn('[NSUserDefaults.standardUserDefaults setBool:enabled forKey:key];', toggle_handler)
+        self.assertIn('setenv(key.UTF8String, enabled ? "1" : "0", 1);', toggle_handler)
+
+    def test_launcher_focus_uses_fill_and_restores_unfocused_colors(self):
+        button = self.menu[self.menu.index('- (UIButton *)makeMenuButton:'):
+                           self.menu.index('- (void)viewDidLayoutSubviews')]
+        self.assertIn('BOOL focused = weakSelf.controllerFocusedView == updatedButton;', button)
+        self.assertIn('updated.baseForegroundColor = dark;', button)
+        self.assertIn('updated.background.backgroundColor = focusGold;', button)
+        self.assertIn('updatedButton.isHighlighted ? [base colorWithAlphaComponent:0.72] : base', button)
+        self.assertIn('configuration.background.backgroundColor', button)
+
+    def test_focus_debounces_held_inputs_and_stops_when_the_menu_leaves(self):
+        self.assertIn('ring.borderWidth = 3;', self.menu)
+        self.assertIn('[view.layer addSublayer:ring];', self.menu)
+        self.assertIn('if (!any) { self.controllerInputHeld = NO; return; }', self.menu)
+        self.assertIn('if (self.controllerInputHeld) return;', self.menu)
+        self.assertIn('self.controllerInputHeld = YES; // Require one neutral sample after launch or foregrounding.', self.menu)
+        self.assertIn('self.controllerInputHeld = YES; // A held button on a reconnect cannot activate the menu immediately.', self.menu)
+        self.assertIn('if (!gamepad) {', self.menu)
+        self.assertIn('shoulderLeft || shoulderRight', self.menu)
+        for method in ('viewWillDisappear:', 'applicationWillResignActive:', 'sceneWillDeactivate:', 'playTapped:'):
+            start = self.menu.index('- (void)' + method)
+            end = self.menu.find('\n- (', start + 5)
+            if end == -1: end = len(self.menu)
+            self.assertIn('[self stopControllerPolling];', self.menu[start:end], method)
+        self.assertIn('!self.lastPolledController || !items.count', self.menu)
 
 
 class MenuVideo(unittest.TestCase):

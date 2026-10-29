@@ -83,6 +83,21 @@ static void *run_host(void *unused) { (void)unused; return (void *)(intptr_t)tot
 /* Key 1's settings panel is Mac only (runtime/frontend.m). */
 void runtime_settings_toggle(void) {}
 
+#if !TARGET_OS_VISION && !defined(GAME_BOTW)
+/* The menu persists TOTK_DOCKED; apply it after Play, before the game view attaches its Metal layer or shader setup starts.
+   overwrite=0 for drawable height and scene resolution keeps explicit devicectl settings in control. */
+static void apply_totk_display_preferences(void) {
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"TOTK_DOCKED"]) {
+        setenv("TOTK_OPERATION_MODE", "docked", 1);
+        setenv("TOTK_IOS_DRAWABLE_H", "1080", 0);
+        setenv("TOTK_RENDER_RES", "1600x900", 0);
+        fprintf(stderr, "[totk] Settings › Display: docked, 1920x1080 output, 1600x900 scene\n");
+    } else {
+        setenv("TOTK_OPERATION_MODE", "handheld", 1);
+    }
+}
+#endif
+
 @interface TOTKMetalView : UIView @end
 @implementation TOTKMetalView
 + (Class)layerClass { return CAMetalLayer.class; }
@@ -173,6 +188,9 @@ void runtime_settings_toggle(void) {}
     menu.playHandler = ^{
         TOTKSceneDelegate *strongSelf = weakSelf;
         if (!strongSelf.window) return;
+#if !TARGET_OS_VISION && !defined(GAME_BOTW)
+        apply_totk_display_preferences();
+#endif
         TOTKGameController *game = [TOTKGameController new];
         strongSelf.window.rootViewController = game;
     };
@@ -232,6 +250,12 @@ static void audio_observe(void) {
     (void)options;
     // Controller input does not reset the idle timer; auto-lock would suspend the game mid-play or mid shader import.
     application.idleTimerDisabled = YES;
+#if !TARGET_OS_VISION && !defined(GAME_BOTW)
+    /* The menu stores the gameplay-only physical controller layout choice. Keep an explicit devicectl environment
+       value in control when present; the default preference is off. */
+    setenv("TOTK_SWAP_CONTROLLER_LAYOUT",
+           [NSUserDefaults.standardUserDefaults boolForKey:@"TOTK_SWAP_CONTROLLER_LAYOUT"] ? "1" : "0", 0);
+#endif
 #if !TARGET_OS_VISION && !defined(GAME_BOTW)
     /* Set the mixable playback category before the muted menu clip starts. Do not activate here: launch-time
        activation blocked the main thread before its log setup on affected iOS versions. */
@@ -339,20 +363,12 @@ static void audio_observe(void) {
     setenv("TOTK_MFX_UPSCALE","0",0);
     setenv("TOTK_FPS_OVERLAY","0",0);
 #else
-    /* Settings › Full HD (docked), Tears of the Kingdom only, off by default (a Vision Pro contributor's patch, user
-       2026-10-25): the game's docked settings as the Vision Pro build uses them, 1920x1080 output on a 1080-row drawable
-       with the scene at 1600x900 (1.4.3 renders 960x540 on the phone otherwise, game_patches_v143.c render_res). Off is the
-       handheld 1280x720 the phones were tested at. The Settings pane of Breath of the Wild has no such switch
-       (build_ipa.py). */
-#ifndef GAME_BOTW
-    if ([NSUserDefaults.standardUserDefaults boolForKey:@"TOTK_DOCKED"]) {
-        setenv("TOTK_OPERATION_MODE","docked",1);
-        setenv("TOTK_IOS_DRAWABLE_H","1080",0);
-        setenv("TOTK_RENDER_RES","1600x900",0);
-        fprintf(stderr, "[totk] Settings › Full HD: docked, 1920x1080 output, 1600x900 scene\n");
-    } else
-#endif
+#ifdef GAME_BOTW
+    /* Breath of the Wild has no docked choice in its Settings bundle. */
     setenv("TOTK_OPERATION_MODE","handheld",1);
+#else
+    /* TOTK display preferences are applied from Play before the game view and shader setup start. */
+#endif
 #endif
     // Game language: the Settings app (Settings.bundle › TOTK_LANG) stores the choice in our defaults; empty means the
     // system language, which is what the runtime already follows. iOS 27 does not honour Info.plist LSEnvironment, so
